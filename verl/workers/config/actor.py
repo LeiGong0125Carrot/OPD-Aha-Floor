@@ -112,6 +112,8 @@ class SelfDistillationConfig(BaseConfig):
     teacher_image_key: Optional[str] = None
     counterfactual_null_mode: Optional[str] = None
     counterfactual_extrapolation_beta: float = 1.0
+    counterfactual_null_scope: str = "all"
+    counterfactual_u_clip_pos: bool = False
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -165,6 +167,16 @@ class SelfDistillationConfig(BaseConfig):
             raise ValueError(
                 "self_distillation.counterfactual_extrapolation_beta must be non-negative, "
                 f"got {self.counterfactual_extrapolation_beta}"
+            )
+        if self.counterfactual_null_scope not in ("all", "last"):
+            raise ValueError(
+                "self_distillation.counterfactual_null_scope must be 'all' or 'last', "
+                f"got {self.counterfactual_null_scope}"
+            )
+        if self.counterfactual_u_clip_pos and self.counterfactual_null_mode is None:
+            raise ValueError(
+                "self_distillation.counterfactual_u_clip_pos=True requires counterfactual_null_mode "
+                "(the clip applies to u = log p_real - log p_null)"
             )
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")

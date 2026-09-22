@@ -1112,7 +1112,9 @@ def compute_self_distillation_loss(
     counterfactual_extrapolation_beta = float(
         getattr(self_distillation_config, "counterfactual_extrapolation_beta", 1.0)
     )
+    counterfactual_u_clip_pos = bool(getattr(self_distillation_config, "counterfactual_u_clip_pos", False))
     counterfactual_target_tv_per_token = None
+    sup_frac_u_pos_per_token = None
 
     if self_distillation_config.full_logit_distillation:
         use_topk = self_distillation_config.distillation_topk is not None
@@ -1159,10 +1161,17 @@ def compute_self_distillation_loss(
                 )
             # Configurable residual extrapolation in log-probability space:
             # q = softmax(log p_real + beta * (log p_real - log p_null)).
+            u_term = teacher_real_distill_log_probs - teacher_null_distill_log_probs
+            if counterfactual_u_clip_pos:
+                # Suppression-only tilt: q ∝ p_real * exp(beta * min(u, 0)).
+                # Only the negative half of the visual contrast enters the target;
+                # tokens the real image supports (u > 0) keep their p_real mass and
+                # receive the suppressed mass proportionally via renormalization.
+                with torch.no_grad():
+                    sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
+                u_term = torch.clamp(u_term, max=0.0)
             teacher_distill_log_probs = F.log_softmax(
-                teacher_real_distill_log_probs
-                + counterfactual_extrapolation_beta
-                * (teacher_real_distill_log_probs - teacher_null_distill_log_probs),
+                teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
                 dim=-1,
             )
             counterfactual_target_tv_per_token = 0.5 * (
@@ -1238,6 +1247,10 @@ def compute_self_distillation_loss(
     if counterfactual_target_tv_per_token is not None:
         metrics["self_distillation/counterfactual_target_tv"] = (
             verl_F.masked_sum(counterfactual_target_tv_per_token, loss_mask) / valid_token_count
+        ).detach().item()
+    if sup_frac_u_pos_per_token is not None:
+        metrics["self_distillation/sup_frac_u_pos"] = (
+            verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count
         ).detach().item()
 
     loss = agg_loss(

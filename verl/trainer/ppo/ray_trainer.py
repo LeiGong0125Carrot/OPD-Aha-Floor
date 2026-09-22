@@ -729,10 +729,17 @@ class RayPPOTrainer:
         raise TypeError(f"Unsupported teacher image type: {type(image)}")
 
     @staticmethod
-    def _mean_color_teacher_images(teacher_images: list[Any]) -> list[Image.Image]:
+    def _mean_color_teacher_images(teacher_images: list[Any], null_scope: str = "all") -> list[Image.Image]:
+        # null_scope="last": only the final image per row is blanked (shared-context
+        # pair views [full image, crop] keep the full image so the contrast isolates
+        # the crop's contribution). "all" = official behavior (every image blanked).
         null_images = []
-        for image in teacher_images:
+        last_idx = len(teacher_images) - 1
+        for idx, image in enumerate(teacher_images):
             normalized = RayPPOTrainer._normalize_teacher_image(image)
+            if null_scope == "last" and idx != last_idx:
+                null_images.append(normalized)
+                continue
             mean_rgb = np.asarray(normalized, dtype=np.float32).mean(axis=(0, 1))
             fill = tuple(np.rint(mean_rgb).clip(0, 255).astype(np.uint8).tolist())
             null_images.append(Image.new("RGB", normalized.size, fill))
@@ -1353,7 +1360,10 @@ class RayPPOTrainer:
                 teacher_multi_modal_inputs_list.append(teacher_multi_modal_inputs)
 
                 if counterfactual_null_mode == "mean_color":
-                    teacher_null_images = self._mean_color_teacher_images(teacher_images)
+                    teacher_null_images = self._mean_color_teacher_images(
+                        teacher_images,
+                        null_scope=self_distillation_cfg.get("counterfactual_null_scope", "all"),
+                    )
                     teacher_null_messages = self._prepare_teacher_messages(
                         list(batch.non_tensor_batch["raw_prompt"][i]),
                         teacher_null_images,

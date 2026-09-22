@@ -148,6 +148,15 @@ self_distillation:
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 
+  # Which teacher images the mean-color null blanks: "all" (official) or "last"
+  # (pair views [full, crop]: keep the full image, blank only the crop).
+  counterfactual_null_scope: all
+
+  # Suppression-only tilt: clamp u = log p_real - log p_null at 0 from above,
+  # i.e. q ∝ p_real * exp(beta * min(u, 0)). Only the negative half of the
+  # visual contrast enters the target; false = official full tilt.
+  counterfactual_u_clip_pos: false
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 
