@@ -157,6 +157,16 @@ self_distillation:
   # visual contrast enters the target; false = official full tilt.
   counterfactual_u_clip_pos: false
 
+  # ST (selective suppression + conserved transfer): replaces the exponential tilt.
+  # Donor set D = {u < -tau} ∩ Head(p_real; head_ratio) ∩ Head(student; head_ratio);
+  # delta = min(eps, alpha_max * mass(D)) probability mass moves from D to the
+  # recipient set {u >= -tau}, each group rescaled proportionally; tail untouched.
+  counterfactual_st_enable: false
+  counterfactual_st_tau: 0.10
+  counterfactual_st_head_ratio: 0.10
+  counterfactual_st_alpha_max: 0.50
+  counterfactual_st_eps: 0.30
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

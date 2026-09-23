@@ -114,6 +114,11 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_extrapolation_beta: float = 1.0
     counterfactual_null_scope: str = "all"
     counterfactual_u_clip_pos: bool = False
+    counterfactual_st_enable: bool = False
+    counterfactual_st_tau: float = 0.10
+    counterfactual_st_head_ratio: float = 0.10
+    counterfactual_st_alpha_max: float = 0.50
+    counterfactual_st_eps: float = 0.30
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -178,6 +183,28 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.counterfactual_u_clip_pos=True requires counterfactual_null_mode "
                 "(the clip applies to u = log p_real - log p_null)"
             )
+        if self.counterfactual_st_enable:
+            if self.counterfactual_null_mode is None:
+                raise ValueError(
+                    "self_distillation.counterfactual_st_enable=True requires counterfactual_null_mode"
+                )
+            if self.counterfactual_u_clip_pos:
+                raise ValueError(
+                    "counterfactual_st_enable and counterfactual_u_clip_pos are mutually exclusive "
+                    "(ST replaces the tilt entirely; u_clip_pos modifies it)"
+                )
+            if self.counterfactual_st_tau < 0.0:
+                raise ValueError(f"counterfactual_st_tau must be >= 0, got {self.counterfactual_st_tau}")
+            if not 0.0 < self.counterfactual_st_head_ratio <= 1.0:
+                raise ValueError(
+                    f"counterfactual_st_head_ratio must be in (0,1], got {self.counterfactual_st_head_ratio}"
+                )
+            if not 0.0 < self.counterfactual_st_alpha_max < 1.0:
+                raise ValueError(
+                    f"counterfactual_st_alpha_max must be in (0,1), got {self.counterfactual_st_alpha_max}"
+                )
+            if not 0.0 < self.counterfactual_st_eps <= 1.0:
+                raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")
         valid_teacher_model_source = ["legacy", "current", "fixed"]

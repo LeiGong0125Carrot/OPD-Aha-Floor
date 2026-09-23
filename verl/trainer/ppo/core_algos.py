@@ -1113,8 +1113,19 @@ def compute_self_distillation_loss(
         getattr(self_distillation_config, "counterfactual_extrapolation_beta", 1.0)
     )
     counterfactual_u_clip_pos = bool(getattr(self_distillation_config, "counterfactual_u_clip_pos", False))
+    counterfactual_st_enable = bool(getattr(self_distillation_config, "counterfactual_st_enable", False))
+    counterfactual_st_tau = float(getattr(self_distillation_config, "counterfactual_st_tau", 0.10) or 0.10)
+    counterfactual_st_head_ratio = float(
+        getattr(self_distillation_config, "counterfactual_st_head_ratio", 0.10) or 0.10
+    )
+    counterfactual_st_alpha_max = float(
+        getattr(self_distillation_config, "counterfactual_st_alpha_max", 0.50) or 0.50
+    )
+    counterfactual_st_eps = float(getattr(self_distillation_config, "counterfactual_st_eps", 0.30) or 0.30)
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
+    st_delta_per_token = st_cov_per_token = st_donor_frac_per_token = None
+    st_mass_d_per_token = st_mass_r_per_token = None
 
     if self_distillation_config.full_logit_distillation:
         use_topk = self_distillation_config.distillation_topk is not None
@@ -1162,18 +1173,57 @@ def compute_self_distillation_loss(
             # Configurable residual extrapolation in log-probability space:
             # q = softmax(log p_real + beta * (log p_real - log p_null)).
             u_term = teacher_real_distill_log_probs - teacher_null_distill_log_probs
-            if counterfactual_u_clip_pos:
-                # Suppression-only tilt: q ∝ p_real * exp(beta * min(u, 0)).
-                # Only the negative half of the visual contrast enters the target;
-                # tokens the real image supports (u > 0) keep their p_real mass and
-                # receive the suppressed mass proportionally via renormalization.
+            if counterfactual_st_enable:
+                # ST (selective suppression + conserved transfer), replaces the tilt:
+                # donors D = {u < -tau} ∩ Head(a; rho) ∩ Head(s; rho) lose
+                # delta = min(eps, alpha_max * mass(D)) of probability mass; recipients
+                # {u >= -tau} receive it proportionally to a; everything else (incl.
+                # the tail bucket) keeps a. Conserved: TV(q, a) = delta exactly.
                 with torch.no_grad():
-                    sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
-                u_term = torch.clamp(u_term, max=0.0)
-            teacher_distill_log_probs = F.log_softmax(
-                teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
-                dim=-1,
-            )
+                    a_prob = teacher_real_distill_log_probs.exp()
+                    s_prob = student_distill_log_probs.detach().exp()
+                    explicit = torch.ones_like(a_prob, dtype=torch.bool)
+                    if use_topk and self_distillation_config.distillation_add_tail:
+                        explicit[..., -1] = False
+                    a_exp = a_prob.masked_fill(~explicit, 0.0)
+                    s_exp = s_prob.masked_fill(~explicit, 0.0)
+                    head_a = a_exp >= counterfactual_st_head_ratio * a_exp.amax(dim=-1, keepdim=True)
+                    head_s = s_exp >= counterfactual_st_head_ratio * s_exp.amax(dim=-1, keepdim=True)
+                    donors = (u_term < -counterfactual_st_tau) & head_a & head_s & explicit
+                    recipients = (u_term >= -counterfactual_st_tau) & explicit
+                    st_mass_d_per_token = (a_prob * donors).sum(dim=-1)
+                    st_mass_r_per_token = (a_prob * recipients).sum(dim=-1)
+                    st_valid = (st_mass_d_per_token > 0) & (st_mass_r_per_token > 0)
+                    st_delta_per_token = (
+                        torch.minimum(
+                            torch.full_like(st_mass_d_per_token, counterfactual_st_eps),
+                            counterfactual_st_alpha_max * st_mass_d_per_token,
+                        )
+                        * st_valid.float()
+                    )
+                    _tiny = 1e-12
+                    scale_d = (1.0 - st_delta_per_token / st_mass_d_per_token.clamp_min(_tiny)).unsqueeze(-1)
+                    scale_r = (1.0 + st_delta_per_token / st_mass_r_per_token.clamp_min(_tiny)).unsqueeze(-1)
+                    q_st = a_prob * torch.where(
+                        donors, scale_d, torch.where(recipients, scale_r, torch.ones_like(a_prob))
+                    )
+                    q_st = q_st / q_st.sum(dim=-1, keepdim=True).clamp_min(_tiny)
+                    teacher_distill_log_probs = (q_st + _tiny).log()
+                    st_cov_per_token = st_valid.float()
+                    st_donor_frac_per_token = donors.float().sum(dim=-1) / explicit.float().sum(dim=-1).clamp(min=1.0)
+            else:
+                if counterfactual_u_clip_pos:
+                    # Suppression-only tilt: q ∝ p_real * exp(beta * min(u, 0)).
+                    # Only the negative half of the visual contrast enters the target;
+                    # tokens the real image supports (u > 0) keep their p_real mass and
+                    # receive the suppressed mass proportionally via renormalization.
+                    with torch.no_grad():
+                        sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
+                    u_term = torch.clamp(u_term, max=0.0)
+                teacher_distill_log_probs = F.log_softmax(
+                    teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
+                    dim=-1,
+                )
             counterfactual_target_tv_per_token = 0.5 * (
                 teacher_distill_log_probs.exp() - teacher_real_distill_log_probs.exp()
             ).abs().sum(dim=-1)
@@ -1252,6 +1302,17 @@ def compute_self_distillation_loss(
         metrics["self_distillation/sup_frac_u_pos"] = (
             verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count
         ).detach().item()
+    if st_delta_per_token is not None:
+        for _name, _t in (
+            ("st_delta_tv", st_delta_per_token),
+            ("st_donor_coverage", st_cov_per_token),
+            ("st_donor_tokens_frac", st_donor_frac_per_token),
+            ("st_mass_donor", st_mass_d_per_token),
+            ("st_mass_recipient", st_mass_r_per_token),
+        ):
+            metrics[f"self_distillation/{_name}"] = (
+                verl_F.masked_sum(_t, loss_mask) / valid_token_count
+            ).detach().item()
 
     loss = agg_loss(
         loss_mat=weighted_per_token_loss,
