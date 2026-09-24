@@ -167,6 +167,11 @@ self_distillation:
   counterfactual_st_alpha_max: 0.50
   counterfactual_st_eps: 0.30
 
+  # Plausibility floor (Ren ICLR25 anti-squeeze), ported from the OPSA floor arm:
+  # negative u is clamped to 0 where p_real < alpha * max(p_real), so the negative
+  # force lands only on the head; positive u untouched. 0 = off (official tilt).
+  counterfactual_floor_alpha: 0.0
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

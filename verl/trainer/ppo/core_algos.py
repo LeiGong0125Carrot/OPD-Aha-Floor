@@ -20,6 +20,7 @@ implement PPO-like algorithms.
 
 __all__ = ["register_adv_est", "get_adv_estimator_fn", "AdvantageEstimator"]
 
+import math
 from collections import defaultdict
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -1122,8 +1123,12 @@ def compute_self_distillation_loss(
         getattr(self_distillation_config, "counterfactual_st_alpha_max", 0.50) or 0.50
     )
     counterfactual_st_eps = float(getattr(self_distillation_config, "counterfactual_st_eps", 0.30) or 0.30)
+    counterfactual_floor_alpha = float(
+        getattr(self_distillation_config, "counterfactual_floor_alpha", 0.0) or 0.0
+    )
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
+    floor_clamped_frac_per_token = None
     st_delta_per_token = st_cov_per_token = st_donor_frac_per_token = None
     st_mass_d_per_token = st_mass_r_per_token = None
 
@@ -1212,7 +1217,21 @@ def compute_self_distillation_loss(
                     st_cov_per_token = st_valid.float()
                     st_donor_frac_per_token = donors.float().sum(dim=-1) / explicit.float().sum(dim=-1).clamp(min=1.0)
             else:
-                if counterfactual_u_clip_pos:
+                if counterfactual_floor_alpha > 0.0:
+                    # Plausibility floor (Ren ICLR25 anti-squeeze), ported byte-for-byte from
+                    # Vision-OPD-OPSA reconstruct_aha_target: negative u is clamped to 0 on the
+                    # valley (p_real < alpha * max p_real), so the negative force lands only on
+                    # the head. Positive u is untouched everywhere. The tail column belongs to
+                    # the valley by construction (same rule), matching the OPSA arm.
+                    with torch.no_grad():
+                        valley = teacher_real_distill_log_probs < (
+                            math.log(counterfactual_floor_alpha)
+                            + teacher_real_distill_log_probs.amax(dim=-1, keepdim=True)
+                        )
+                        clamp_mask = valley & (u_term < 0)
+                        floor_clamped_frac_per_token = clamp_mask.float().mean(dim=-1)
+                    u_term = torch.where(clamp_mask, torch.zeros_like(u_term), u_term)
+                elif counterfactual_u_clip_pos:
                     # Suppression-only tilt: q ∝ p_real * exp(beta * min(u, 0)).
                     # Only the negative half of the visual contrast enters the target;
                     # tokens the real image supports (u > 0) keep their p_real mass and
@@ -1301,6 +1320,10 @@ def compute_self_distillation_loss(
     if sup_frac_u_pos_per_token is not None:
         metrics["self_distillation/sup_frac_u_pos"] = (
             verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count
+        ).detach().item()
+    if floor_clamped_frac_per_token is not None:
+        metrics["self_distillation/floor_clamped_frac"] = (
+            verl_F.masked_sum(floor_clamped_frac_per_token, loss_mask) / valid_token_count
         ).detach().item()
     if st_delta_per_token is not None:
         for _name, _t in (

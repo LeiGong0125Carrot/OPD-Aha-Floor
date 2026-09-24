@@ -119,6 +119,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_st_head_ratio: float = 0.10
     counterfactual_st_alpha_max: float = 0.50
     counterfactual_st_eps: float = 0.30
+    counterfactual_floor_alpha: float = 0.0
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -205,6 +206,21 @@ class SelfDistillationConfig(BaseConfig):
                 )
             if not 0.0 < self.counterfactual_st_eps <= 1.0:
                 raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
+        if self.counterfactual_floor_alpha:
+            if not 0.0 < self.counterfactual_floor_alpha < 1.0:
+                raise ValueError(
+                    "self_distillation.counterfactual_floor_alpha must be in (0,1) when set, "
+                    f"got {self.counterfactual_floor_alpha}"
+                )
+            if self.counterfactual_null_mode is None:
+                raise ValueError(
+                    "self_distillation.counterfactual_floor_alpha requires counterfactual_null_mode"
+                )
+            if self.counterfactual_u_clip_pos or self.counterfactual_st_enable:
+                raise ValueError(
+                    "counterfactual_floor_alpha is mutually exclusive with counterfactual_u_clip_pos "
+                    "and counterfactual_st_enable (each is a different single-variable ablation)"
+                )
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")
         valid_teacher_model_source = ["legacy", "current", "fixed"]
