@@ -89,6 +89,42 @@ q_prod = F.log_softmax(torch.tensor(P) + beta * torch.tensor(u), dim=-1).exp().n
 assert np.allclose(q_ref, q_prod, atol=1e-10), np.abs(q_ref - q_prod).max()
 print("⑤ tilt 目标 q 与生产 log_softmax 路径一致 ✓")
 
+# ⑤b 口径交叉验证: 把探针的三个 log-prob 喂给**生产函数**, 它自报的
+#     counterfactual_target_tv 必须等于探针自算的 TV(q, p⁺) —— 这条直接证明
+#     探针与训练同口径 (含 add_tail 与 tilt 的实现细节)。
+from verl.trainer.ppo.core_algos import compute_self_distillation_loss  # noqa: E402
+
+
+class _Cfg(dict):
+    __getattr__ = dict.get
+
+
+B, Tt, kk = 1, 5, 6
+lp_stu_t = torch.log_softmax(torch.randn(B, Tt, kk + 4), -1).sort(-1, descending=True).values[..., :kk]
+lp_pos_t = torch.log_softmax(torch.randn(B, Tt, kk + 4), -1).sort(-1, descending=True).values[..., :kk]
+lp_nul_t = torch.log_softmax(torch.randn(B, Tt, kk + 4), -1).sort(-1, descending=True).values[..., :kk]
+cfg = _Cfg({"full_logit_distillation": True, "distillation_topk": kk,
+            "distillation_add_tail": True, "renorm_topk_log_probs": False,
+            "alpha": 0.5, "is_clip": None, "counterfactual_null_mode": "mean_color",
+            "counterfactual_extrapolation_beta": 4.0, "log_prob_dump_dir": None})
+lpz = torch.randn(B, Tt) * 0.1 - 1.0
+_, m_prod = compute_self_distillation_loss(
+    student_log_probs=lpz, teacher_log_probs=lpz.clone(), response_mask=torch.ones(B, Tt),
+    self_distillation_config=cfg, old_log_probs=lpz.clone(),
+    student_topk_log_probs=lp_stu_t, teacher_topk_log_probs=lp_pos_t,
+    teacher_null_topk_log_probs=lp_nul_t, self_distillation_mask=torch.ones(B),
+    loss_agg_mode="token-mean")
+# 探针侧同一公式 (numpy): add_tail -> tilt -> TV(q, p⁺)
+P_ = add_tail(lp_pos_t[0].double().numpy())
+N_ = add_tail(lp_nul_t[0].double().numpy())
+lq = P_ + 4.0 * (P_ - N_)
+lq -= lq.max(-1, keepdims=True)
+q_ = np.exp(lq); q_ /= q_.sum(-1, keepdims=True)
+tv_probe = float(tv(q_, np.exp(P_)).mean())
+tv_prod = m_prod["self_distillation/counterfactual_target_tv"]
+assert abs(tv_probe - tv_prod) < 1e-5, f"探针 TV(q,p+)={tv_probe:.6f} != 生产 {tv_prod:.6f}"
+print(f"⑤b 与生产 compute_self_distillation_loss 同口径: TV={tv_probe:.6f} ✓")
+
 # ⑥ null 视图: 只改末图
 from PIL import Image  # noqa: E402
 

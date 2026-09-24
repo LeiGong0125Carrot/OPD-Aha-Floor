@@ -22,6 +22,11 @@ from collections import defaultdict
 
 import numpy as np
 
+# 稠密 g 向量的长度。不硬编码模型词表: 取一个覆盖 Qwen3.5 (151936) 的上界即可 ——
+# bincount 的 minlength 只要 ≥ 出现过的最大 token id, 且同一次分析里所有 rollout
+# 必须用同一个长度 (否则 R_of 的向量无法对齐)。8×这个长度的 float64 ≈ 10MB, 可忽略。
+VOCAB = 200_000
+
 
 def add_tail(lp):
     """(T,k) logp -> (T,k+1), 与 core_algos.py:1141-1147 同口径。"""
@@ -67,39 +72,48 @@ def rollout_signal(d, beta):
 
     D_view = tv(pp, ps)
     D_tgt = tv(q, ps)
-    # g = Σ_t (p_S − q), 只在 explicit 列 (丢 tail 列, 它不对应具体 token id)
+    # g = Σ_t (p_S − q) ∈ R^V, 只在 explicit 列 (丢 tail 列 —— 它不对应具体 token id)。
+    # bincount 向量化: 同一 token 在不同位置的贡献自动累加 (比 Python 双循环快 ~100x)。
     delta = (ps - q)[:, :-1]
-    g = defaultdict(float)
-    for t in range(ids.shape[0]):
-        for k in range(ids.shape[1]):
-            g[int(ids[t, k])] += float(delta[t, k])
+    g = np.bincount(ids.ravel(), weights=delta.ravel(), minlength=VOCAB)
     tail_mass = float(np.median(1.0 - np.exp(np.logaddexp.reduce(d["lp_stu"].astype(np.float64), -1))))
     return g, D_view, D_tgt, tail_mass
 
 
 def R_of(gs):
-    """gs: list of sparse dict. R = ‖mean g‖ / mean ‖g‖"""
+    """R = ‖mean_i g_i‖ / mean_i ‖g_i‖。
+
+    gs: list of 稠密 vocab 向量 (np.ndarray, 同长) 或 sparse dict (单测用)。
+    标定: 完全同向 → 1; 独立 → 1/√n; 成对反向 → 0。
+    """
     if len(gs) < 2:
         return float("nan")
-    keys = set()
-    for g in gs:
-        keys |= set(g)
-    keys = sorted(keys)
-    M = np.array([[g.get(k, 0.0) for k in keys] for g in gs])
-    mean_vec = M.mean(0)
-    num = np.linalg.norm(mean_vec)
+    if isinstance(gs[0], dict):                      # 单测路径: 稀疏 dict, 取键并集
+        keys = sorted(set().union(*(set(g) for g in gs)))
+        M = np.array([[g.get(k, 0.0) for k in keys] for g in gs], dtype=np.float64)
+    else:
+        M = np.asarray(gs, dtype=np.float64)
+    num = np.linalg.norm(M.mean(0))
     den = np.linalg.norm(M, axis=1).mean()
     return float(num / den) if den > 0 else float("nan")
 
 
 def profile(D, nbin=10):
+    """D_t 按相对位置分 nbin 箱。T < nbin 时返回全 nan (剖面无意义, 下游会跳过)。"""
     T = len(D)
+    if T < nbin:
+        return np.full(nbin, np.nan)
     edges = np.linspace(0, T, nbin + 1).astype(int)
     return np.array([D[edges[i]:edges[i + 1]].mean() if edges[i + 1] > edges[i] else np.nan
                      for i in range(nbin)])
 
 
 def spearman(a, b):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    ok = np.isfinite(a) & np.isfinite(b)
+    if ok.sum() < 3:
+        return float("nan")
+    a, b = a[ok], b[ok]
     ra, rb = np.argsort(np.argsort(a)), np.argsort(np.argsort(b))
     ra, rb = ra - ra.mean(), rb - rb.mean()
     d = np.sqrt((ra ** 2).sum() * (rb ** 2).sum())

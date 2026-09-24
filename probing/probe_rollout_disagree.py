@@ -64,13 +64,28 @@ def build_messages_from_template(content: str, images):
     return [{"role": "user", "content": out}]
 
 
-def encode(processor, device, messages):
+def encode_student(processor, device, messages):
+    """Student 侧: 走 qwen_vl_utils.process_vision_info (含 smart_resize) —— 与训练的
+    agent_loop 路径一致 (agent_loop.py:242-260 -> dataset_cls.process_vision_info)。"""
     from qwen_vl_utils import process_vision_info
 
     image_inputs, video_inputs = process_vision_info(messages)
     txt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     return processor(text=[txt], images=image_inputs, videos=video_inputs,
                      padding=True, return_tensors="pt").to(device)
+
+
+def encode_teacher(processor, device, messages, max_prompt_len=10240):
+    """Teacher / null 侧: **不走** process_vision_info, 直接把 PIL list 交给 processor ——
+    与训练的 _build_teacher_prompt_inputs (ray_trainer.py:1006-1015) 逐参数一致
+    (text=[raw_prompt], images=PIL list, videos=None, truncation=True, max_length=10240)。
+    两条路的 smart_resize 行为不同, 混用会让 teacher 的 image_grid_thw 偏离训练。"""
+    from verl.trainer.ppo.ray_trainer import RayPPOTrainer
+
+    imgs = RayPPOTrainer._extract_images_from_messages(messages)
+    txt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    return processor(text=[txt], images=imgs or None, videos=None, return_tensors="pt",
+                     truncation=True, max_length=max_prompt_len).to(device)
 
 
 @torch.no_grad()
@@ -171,6 +186,9 @@ def main():
     mf = open(meta_path, "a")
 
     for row in rows:
+        if all((int(row), s) in done for s in range(args.n)):
+            print(f"[row {row}] 全部 {args.n} 条已完成, 跳过 (省去重复生成)", flush=True)
+            continue
         item = df.iloc[row]
         stu_content = item["prompt"][0]["content"]
         tch_content = item["teacher_prompt"][0]["content"]
@@ -182,9 +200,9 @@ def main():
         msg_stu = build_messages_from_template(stu_content, stu_imgs)
         msg_pos = build_messages_from_template(tch_content, pos_imgs)
         msg_null = build_messages_from_template(tch_content, null_imgs)
-        in_stu = encode(processor, model.device, msg_stu)
-        in_pos = encode(processor, model.device, msg_pos)
-        in_null = encode(processor, model.device, msg_null)
+        in_stu = encode_student(processor, model.device, msg_stu)
+        in_pos = encode_teacher(processor, model.device, msg_pos)
+        in_null = encode_teacher(processor, model.device, msg_null)
 
         # ---- rollout 生成 (student 视图), 训练同采样参数; n 条一次批量, OOM 降级逐条 ----
         gen_kw = dict(do_sample=True, temperature=args.temperature, top_p=args.top_p,
@@ -208,7 +226,7 @@ def main():
         p0 = in_stu["input_ids"].shape[1]
 
         for sid in range(args.n):
-            if (row, sid) in done:
+            if (int(row), sid) in done:
                 continue
             ids = trim_at_eos(gen[sid][p0:].tolist(), eos_ids)
             if len(ids) < 2:
