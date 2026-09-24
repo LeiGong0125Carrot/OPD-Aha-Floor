@@ -223,7 +223,7 @@ def main():
     for p in per_row:
         say(f"{p['row']:>5}{p['n']:>3}{p['R_full']:>8.3f}{p['R_pair']:>8.3f}"
             f"{p['C_view']:>11.4f}{p['C_tgt']:>10.4f}{p['cv_tgt']:>8.3f}"
-            f"{p['spearman']:>9.3f}{100*p['box_frac']:>7.2f}")
+            f"{p['spearman']:>9.3f}{p["box_frac"]:>7.2f}")
 
     Rf = np.array([p["R_full"] for p in per_row])
     Rp = np.array([p["R_pair"] for p in per_row])
@@ -267,7 +267,7 @@ def main():
         lo, hi = Rf[bf <= med], Rf[bf > med]
         if len(lo) and len(hi):
             say("")
-            say(f"按 GT 框占比分层 (中位 {100*med:.2f}%):")
+            say(f"按 GT 框占比分层 (中位 {med:.2f}%):")
             say(f"  小框 (≤中位): R_n={np.nanmean(lo):.3f} (n={len(lo)})")
             say(f"  大框 (>中位): R_n={np.nanmean(hi):.3f} (n={len(hi)})")
 
