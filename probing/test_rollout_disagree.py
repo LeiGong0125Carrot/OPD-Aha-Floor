@@ -163,4 +163,39 @@ assert abs(spearman(pf, pf) - 1.0) < 1e-9
 assert abs(spearman(pf, -pf) + 1.0) < 1e-9
 print("附 profile / spearman ✓")
 
-print("\ntest_rollout_disagree: ALL 7 GROUPS PASS")
+
+# ⑧ Layer-2 轨迹状态量: 对拍设计文档 §5.3/§5.4 的手算表 (λ=0.8, τ_u=0.5)
+from analyze_rollout_disagree import realized_state  # noqa: E402
+
+doc = [("The", .90, -.03), ("red", .80, +.10), ("right", .75, -1.00),
+       ("side", .65, -.20), ("so", .85, -.10), ("B", .70, -.80)]
+doc_C = [0.011, 0.009, 0.152, 0.171, 0.170, 0.265]        # 文档 §5.4 表
+T8, k8 = len(doc), 4
+# 构造 dump: y_t 恒为 support 第 1 列(索引 0 是 student 的 top-1, 用第 col 列放 y)
+ids8 = np.tile(np.array([[100, 101, 102, 103]]), (T8, 1)).astype(np.int32)
+y8 = np.full(T8, 101, dtype=np.int32)                      # y 落在第 1 列
+lp_s8 = np.zeros((T8, k8))
+for t, (_, m, _u) in enumerate(doc):
+    lp_s8[t, 0] = np.log(0.40)                             # max_v p_S
+    lp_s8[t, 1] = np.log(0.40 * m)                         # p_S(y_t) = m * max
+    lp_s8[t, 2] = lp_s8[t, 3] = np.log(1e-4)
+lp_p8 = np.zeros((T8, k8)) + np.log(0.1)
+lp_n8 = lp_p8.copy()
+for t, (_, _m, u) in enumerate(doc):
+    lp_n8[t, 1] = lp_p8[t, 1] - u                          # u(y_t) = lp_pos - lp_null
+d8 = {"ids": ids8, "y": y8, "lp_stu": lp_s8.astype(np.float16),
+      "lp_pos": lp_p8.astype(np.float16), "lp_null": lp_n8.astype(np.float16)}
+s8 = realized_state(d8, beta=2.0, tau_u=0.5, lam=0.8)
+assert s8["miss"] == 0, s8["miss"]
+assert np.allclose(s8["m"], [m for _, m, _u in doc], atol=2e-3), s8["m"]
+assert np.allclose(s8["C_ema"], doc_C, atol=2e-3), (s8["C_ema"], doc_C)
+# max 变体: 强事件立即生效 -> 在 'right' 处就该 ≥ EMA
+i_right = 2
+assert s8["C_max"][i_right] > s8["C_ema"][i_right], (s8["C_max"][i_right], s8["C_ema"][i_right])
+# e_t=0 时 EMA 应按 λ 衰减
+assert abs(s8["C_ema"][1] - 0.8 * s8["C_ema"][0]) < 1e-9
+print(f"⑧ Layer-2 C_t 对拍文档手算表: EMA={np.round(s8['C_ema'],3).tolist()} ✓")
+print(f"   max 变体 @right: {s8['C_max'][i_right]:.3f} > EMA {s8['C_ema'][i_right]:.3f} "
+      f"(强事件立即生效) ✓")
+
+print("\ntest_rollout_disagree: ALL 8 GROUPS PASS")

@@ -242,6 +242,10 @@ def main():
             npz = f"{row}_{sid}.npz"
             np.savez_compressed(os.path.join(args.out, npz),
                                 ids=sup_ids.numpy().astype(np.int32),
+                                # y = 学生实际生成的 token (逐位置)。Layer-2 型指标
+                                # (o_t/m_t/e_t/C_t, 见 trajectory_gated_* 设计) 全部定义在
+                                # 实际生成的 token 上, 没有它就只能算词表级的量。
+                                y=cont.numpy().astype(np.int32),
                                 lp_stu=lp_stu.numpy().astype(np.float16),
                                 lp_pos=lp_pos.numpy().astype(np.float16),
                                 lp_null=lp_null.numpy().astype(np.float16))

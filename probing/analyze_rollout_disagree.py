@@ -80,6 +80,53 @@ def rollout_signal(d, beta):
     return g, D_view, D_tgt, tail_mass
 
 
+def realized_state(d, beta, tau_u=0.5, lam=0.8, gamma=1.0):
+    """轨迹状态量 (trajectory_gated_negative_visual_mass_transfer.md 的 Layer 2) 的
+    **离线定标**: 全部定义在学生实际生成的 token y_t 上。
+
+      m_t = (p_S(y_t)/max_v p_S(v))^γ         承诺度
+      o_t = tanh([-u_t(y_t)]_+ / τ_u)          视觉反对强度
+      e_t = m_t · o_t                          单步冲突事件
+      C_t = λC_{t-1} + (1-λ)e_t                EMA 变体
+      C_t' = max(λC_{t-1}, e_t)                max 变体 (强事件立即生效)
+
+    另算 Layer 3 在这两种 C 下的实际转移量 Δ_t = C_t·Σ_v p⁺(v)[1-e^{β·min(u,0)}],
+    它等于 TV(q, p⁺) —— 直接与 supn8 (0.065) / stn8 (0.059) / A (0.25) 的剂量对照。
+    返回 dict; 若 y_t 落在 support 外则该位置记为 miss (support 是 student top-k,
+    而 y_t 从 student 采样, 故 miss 应极少)。
+    """
+    ids = d["ids"].astype(np.int64)
+    y = d["y"].astype(np.int64)
+    lp_s = d["lp_stu"].astype(np.float64)
+    u_all = d["lp_pos"].astype(np.float64) - d["lp_null"].astype(np.float64)
+    T, k = ids.shape
+    hit = ids == y[:, None]
+    has = hit.any(1)
+    col = np.where(has, hit.argmax(1), 0)
+    rows = np.arange(T)
+    # support 由 student top-k 建且降序 -> 第 0 列即 max_v p_S(v)
+    m = np.exp(lp_s[rows, col] - lp_s[:, 0]) ** gamma
+    u_y = u_all[rows, col]
+    o = np.tanh(np.maximum(-u_y, 0.0) / tau_u)
+    e = np.where(has, m * o, 0.0)
+
+    C_ema = np.empty(T)
+    C_max = np.empty(T)
+    c1 = c2 = 0.0
+    for t in range(T):
+        c1 = lam * c1 + (1 - lam) * e[t]
+        c2 = max(lam * c2, e[t])
+        C_ema[t], C_max[t] = c1, c2
+    # Layer 3 的单位转移量 (C=1 时): Σ_v p⁺(v)[1-e^{β min(u,0)}]
+    P = np.exp(add_tail(d["lp_pos"].astype(np.float64)))
+    P /= P.sum(-1, keepdims=True)
+    u_t = add_tail(d["lp_pos"].astype(np.float64)) - add_tail(d["lp_null"].astype(np.float64))
+    unit = (P * (1.0 - np.exp(beta * np.minimum(u_t, 0.0)))).sum(-1)
+    return dict(m=m[has], o=o[has], e=e[has], C_ema=C_ema, C_max=C_max,
+                unit=unit, miss=int((~has).sum()), T=T,
+                delta_ema=C_ema * unit, delta_max=C_max * unit)
+
+
 def R_of(gs):
     """R = ‖mean_i g_i‖ / mean_i ‖g_i‖。
 
@@ -124,6 +171,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dump", required=True)
     ap.add_argument("--beta", type=float, default=4.0)
+    ap.add_argument("--tau-u", type=float, default=0.5, help="Layer-2 o_t 的温度")
+    ap.add_argument("--lam", type=float, default=0.8, help="Layer-2 C_t 的衰减")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -137,12 +186,19 @@ def main():
 
     per_row = []
     tails = []
+    st = defaultdict(list)          # 轨迹状态量 (Layer-2 定标), 跨 row 汇总
     for row in sorted(rows):
         recs = sorted(rows[row], key=lambda r: r["rollout_id"])
         gs, Cv, Ct, profs = [], [], [], []
         for r in recs:
             d = np.load(os.path.join(args.dump, r["npz"]))
             g, D_view, D_tgt, tm = rollout_signal(d, args.beta)
+            if "y" in d:
+                s = realized_state(d, args.beta, args.tau_u, args.lam)
+                for key in ("m", "o", "e", "C_ema", "C_max", "unit", "delta_ema", "delta_max"):
+                    st[key].append(s[key])
+                st["miss"].append(s["miss"])
+                st["T"].append(s["T"])
             gs.append(g)
             Cv.append(float(D_view.mean()))
             Ct.append(float(D_tgt.mean()))
@@ -214,6 +270,40 @@ def main():
             say(f"按 GT 框占比分层 (中位 {100*med:.2f}%):")
             say(f"  小框 (≤中位): R_n={np.nanmean(lo):.3f} (n={len(lo)})")
             say(f"  大框 (>中位): R_n={np.nanmean(hi):.3f} (n={len(hi)})")
+
+    # ---- 轨迹状态量定标 (Layer-2/3 的先验剂量, 决定 λ/τ_u 该怎么设) ----
+    if st:
+        cat = lambda k: np.concatenate([np.atleast_1d(x) for x in st[k]])  # noqa: E731
+        m_, o_, e_ = cat("m"), cat("o"), cat("e")
+        ce, cm = cat("C_ema"), cat("C_max")
+        de, dm = cat("delta_ema"), cat("delta_max")
+        unit = cat("unit")
+        say("")
+        say("=" * 78)
+        say(f"轨迹状态量定标 (τ_u={args.tau_u}, λ={args.lam}, β={args.beta}; "
+            f"共 {len(ce)} 个位置, y∉support {sum(st['miss'])} 个)")
+        say("-" * 78)
+        for nm, v in (("m_t 承诺度", m_), ("o_t 视觉反对", o_), ("e_t 冲突事件", e_),
+                      ("C_t (EMA)", ce), ("C_t (max变体)", cm),
+                      ("单位转移量 unit", unit),
+                      ("Δ_t=TV(q,p⁺) EMA", de), ("Δ_t=TV(q,p⁺) max", dm)):
+            say(f"  {nm:<20} mean={v.mean():.4f}  p50={np.median(v):.4f}  "
+                f"p90={np.percentile(v, 90):.4f}  max={v.max():.4f}")
+        say("")
+        say("  有效干预位置占比 (Δ_t 超过阈值的比例):")
+        for th in (0.01, 0.03, 0.05):
+            say(f"    Δ>{th:.2f}:  EMA {100*(de > th).mean():5.1f}%   max变体 {100*(dm > th).mean():5.1f}%")
+        say("")
+        say(f"  剂量对照: A=0.250  supn8=0.065  stn8=0.059  "
+            f"→ 本方法 mean Δ = {de.mean():.4f}(EMA) / {dm.mean():.4f}(max)")
+        if de.mean() < 0.01:
+            say("  ⚠ EMA 变体的平均剂量 <0.01 = 目标几乎恒等于 p⁺ (退化为普通特权蒸馏),")
+            say("    需调大 (1-λ)/调小 τ_u, 否则重演 stn8 的 71% 位置空转陷阱。")
+        if (de > 0.01).mean() < 0.10:
+            say("  ⚠ 有效干预位置 <10%: 机制在绝大多数位置不发力。")
+        say(f"  EMA vs max 的时序差: max 变体平均剂量是 EMA 的 {dm.mean()/max(de.mean(),1e-9):.2f}x")
+        say("    (EMA 每步只吸收 (1-λ)={:.0%} 的当期事件, 强事件要多步才累积起来 ——".format(1 - args.lam))
+        say("     '刹车在车开进去之后才踩'; max 变体让强事件立即生效。)")
 
     txt = "\n".join(L)
     print(txt)
