@@ -22,10 +22,10 @@ from collections import defaultdict
 
 import numpy as np
 
-# 稠密 g 向量的长度。不硬编码模型词表: 取一个覆盖 Qwen3.5 (151936) 的上界即可 ——
-# bincount 的 minlength 只要 ≥ 出现过的最大 token id, 且同一次分析里所有 rollout
-# 必须用同一个长度 (否则 R_of 的向量无法对齐)。8×这个长度的 float64 ≈ 10MB, 可忽略。
-VOCAB = 200_000
+# g 用 (ids, vals) 稀疏表示, 不猜词表大小。
+# (踩过的坑: 曾用 VOCAB=200_000 的稠密向量, 但 Qwen3.5 的 eos_token_id=248044 —— 词表
+#  ≥248045。support 里一旦出现超界 id, np.bincount 会返回更长的数组, 不同 rollout 长度
+#  不一致, R_of 里 np.asarray 直接崩。稀疏并集对齐彻底免除这个假设。)
 
 
 def add_tail(lp):
@@ -75,7 +75,9 @@ def rollout_signal(d, beta):
     # g = Σ_t (p_S − q) ∈ R^V, 只在 explicit 列 (丢 tail 列 —— 它不对应具体 token id)。
     # bincount 向量化: 同一 token 在不同位置的贡献自动累加 (比 Python 双循环快 ~100x)。
     delta = (ps - q)[:, :-1]
-    g = np.bincount(ids.ravel(), weights=delta.ravel(), minlength=VOCAB)
+    # 稀疏聚合: 同一 token 在不同位置的贡献相加, 返回 (出现过的 ids, 对应累加值)
+    uniq, inv = np.unique(ids.ravel(), return_inverse=True)
+    g = (uniq, np.bincount(inv, weights=delta.ravel(), minlength=len(uniq)))
     tail_mass = float(np.median(1.0 - np.exp(np.logaddexp.reduce(d["lp_stu"].astype(np.float64), -1))))
     return g, D_view, D_tgt, tail_mass
 
@@ -130,16 +132,20 @@ def realized_state(d, beta, tau_u=0.5, lam=0.8, gamma=1.0):
 def R_of(gs):
     """R = ‖mean_i g_i‖ / mean_i ‖g_i‖。
 
-    gs: list of 稠密 vocab 向量 (np.ndarray, 同长) 或 sparse dict (单测用)。
+    gs: list of (ids, vals) 稀疏对 (生产路径) 或 dict (单测路径)。
+    两种都在**出现过的 token 并集**上对齐, 不依赖词表大小。
     标定: 完全同向 → 1; 独立 → 1/√n; 成对反向 → 0。
     """
     if len(gs) < 2:
         return float("nan")
-    if isinstance(gs[0], dict):                      # 单测路径: 稀疏 dict, 取键并集
+    if isinstance(gs[0], dict):                      # 单测路径
         keys = sorted(set().union(*(set(g) for g in gs)))
         M = np.array([[g.get(k, 0.0) for k in keys] for g in gs], dtype=np.float64)
-    else:
-        M = np.asarray(gs, dtype=np.float64)
+    else:                                            # 生产路径: (ids, vals)
+        all_ids = np.unique(np.concatenate([ids for ids, _ in gs]))
+        M = np.zeros((len(gs), len(all_ids)), dtype=np.float64)
+        for i, (ids_i, v_i) in enumerate(gs):
+            M[i, np.searchsorted(all_ids, ids_i)] = v_i
     num = np.linalg.norm(M.mean(0))
     den = np.linalg.norm(M, axis=1).mean()
     return float(num / den) if den > 0 else float("nan")

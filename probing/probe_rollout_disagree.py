@@ -132,7 +132,12 @@ def forced_logp(model, inputs, cont_ids, support_ids=None, topk=100, chunk=128):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen3.5-4B")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B",
+                    help="teacher 权重。训练里 teacher=frozen ref=base, 故一般不改")
+    ap.add_argument("--student-model", default=None,
+                    help="student 权重 (merged ckpt)。不给 = 与 teacher 同权重 (step-0 状态); "
+                         "给了 = 复现训练中期: student 已漂移而 teacher 仍是 base。"
+                         "rollout 也由该 student 生成 (on-policy)。")
     ap.add_argument("--parquet", default=DEFAULT_PARQUET)
     ap.add_argument("--chat-template", default=DEFAULT_TEMPLATE)
     ap.add_argument("--rows", type=int, default=16, help="随机抽多少行 (--row 指定时忽略)")
@@ -167,10 +172,21 @@ def main():
         processor.chat_template = tpl          # 与 ray_trainer.py:361-365 同款注入
         tokenizer.chat_template = tpl
         print(f">>> 自定义 chat template: {args.chat_template}", flush=True)
-    model = AutoModelForImageTextToText.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, attn_implementation="sdpa",
-        device_map="auto", low_cpu_mem_usage=True)
-    model.eval()
+    def _load(path):
+        m = AutoModelForImageTextToText.from_pretrained(
+            path, torch_dtype=torch.bfloat16, attn_implementation="sdpa",
+            device_map="auto", low_cpu_mem_usage=True)
+        m.eval()
+        return m
+
+    model = _load(args.model)                       # teacher (frozen ref = base)
+    if args.student_model:
+        student = _load(args.student_model)         # 训练中期的 student
+        print(f">>> student 权重独立: {args.student_model}", flush=True)
+        print("    (teacher 仍是 base —— 与训练的 frozen-ref 设置一致)", flush=True)
+    else:
+        student = model                             # step-0: student == teacher
+        print(">>> student == teacher (step-0 状态)", flush=True)
     eos_ids = {tokenizer.eos_token_id}
     for t in ("<|im_end|>",):
         i = tokenizer.convert_tokens_to_ids(t)
@@ -200,7 +216,7 @@ def main():
         msg_stu = build_messages_from_template(stu_content, stu_imgs)
         msg_pos = build_messages_from_template(tch_content, pos_imgs)
         msg_null = build_messages_from_template(tch_content, null_imgs)
-        in_stu = encode_student(processor, model.device, msg_stu)
+        in_stu = encode_student(processor, student.device, msg_stu)
         in_pos = encode_teacher(processor, model.device, msg_pos)
         in_null = encode_teacher(processor, model.device, msg_null)
 
@@ -210,7 +226,7 @@ def main():
         torch.manual_seed(args.seed * 1_000_000 + row)
         try:
             with torch.inference_mode():
-                gen = model.generate(**in_stu, num_return_sequences=args.n, **gen_kw)
+                gen = student.generate(**in_stu, num_return_sequences=args.n, **gen_kw)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             print(f"[row {row}] n={args.n} 批量 OOM, 降级逐条", flush=True)
@@ -218,7 +234,7 @@ def main():
             for sid in range(args.n):
                 torch.manual_seed(args.seed * 1_000_000 + row + 7919 * (sid + 1))
                 with torch.inference_mode():
-                    seqs.append(model.generate(**in_stu, num_return_sequences=1, **gen_kw)[0])
+                    seqs.append(student.generate(**in_stu, num_return_sequences=1, **gen_kw)[0])
             L = max(s.shape[0] for s in seqs)
             gen = torch.full((args.n, L), list(eos_ids)[0], dtype=seqs[0].dtype, device=seqs[0].device)
             for sid, s in enumerate(seqs):
@@ -234,7 +250,7 @@ def main():
                 continue
             cont = torch.tensor(ids, dtype=torch.long)
             # student 定 support, teacher/null gather 到同一 support (训练口径)
-            sup_ids, lp_stu = forced_logp(model, in_stu, cont, None, args.topk)
+            sup_ids, lp_stu = forced_logp(student, in_stu, cont, None, args.topk)
             _, lp_pos = forced_logp(model, in_pos, cont, sup_ids, args.topk)
             _, lp_null = forced_logp(model, in_null, cont, sup_ids, args.topk)
             assert lp_stu.shape == lp_pos.shape == lp_null.shape == (len(ids), args.topk)
@@ -256,7 +272,8 @@ def main():
                    "gt": str(item["reward_model"].get("ground_truth", "")),
                    "box_frac": float(item["extra_info"].get("box_frac", -1)),
                    "task": str(item["extra_info"].get("task", "")),
-                   "npz": npz, "model": args.model, "topk": args.topk}
+                   "npz": npz, "model": args.model,
+                   "student_model": args.student_model or args.model, "topk": args.topk}
             mf.write(json.dumps(rec, ensure_ascii=False) + "\n")
             mf.flush()
             print(f"  row {row} rid {sid}: T={len(ids)} pred={rec['prediction']} gt={rec['gt']}", flush=True)
