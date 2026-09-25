@@ -22,7 +22,7 @@ export ACTOR_USE_DYNAMIC_BSZ=False
 
 echo "${EXPERIMENT_NAME_OVERRIDE}: floor-only (valley negative-u clamp) β=${COUNTERFACTUAL_EXTRAPOLATION_BETA} (seed42, pair)"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
-    actor_rollout_ref.actor.self_distillation.counterfactual_null_scope=last \
+    actor_rollout_ref.actor.self_distillation.counterfactual_null_scope="${NULL_SCOPE:-last}" \
     actor_rollout_ref.actor.self_distillation.counterfactual_floor_alpha="${FLOOR_ALPHA:-0.1}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
