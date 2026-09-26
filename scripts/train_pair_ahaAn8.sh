@@ -21,11 +21,12 @@ export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export ACTOR_USE_DYNAMIC_BSZ=False
 
 echo "${EXPERIMENT_NAME_OVERRIDE}: A baseline (official Aha tilt) β=${COUNTERFACTUAL_EXTRAPOLATION_BETA} (seed42, pair)"
+echo "  并行配置: n_gpus=${TRAINER_N_GPUS_PER_NODE} ulysses_sp=${ULYSSES_SP:-2} rollout_n=${ROLLOUT_N} lr=${LR}  <- 复现跑必须逐项相同"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.counterfactual_null_scope=last \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=2 \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size="${ULYSSES_SP:-2}" \
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size="${ULYSSES_SP:-2}" \
     actor_rollout_ref.model.enable_activation_offload=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \

@@ -172,6 +172,12 @@ self_distillation:
   # force lands only on the head; positive u untouched. 0 = off (official tilt).
   counterfactual_floor_alpha: 0.0
 
+  # Bounded tilt: u <- tau*tanh(u/tau) before the exponential, capping exp(beta*u) to
+  # [exp(-beta*tau), exp(beta*tau)]. 0.0 disables. Composes with floor / u_clip_pos
+  # (tanh is odd and increasing, so their sign-based masks are unchanged); incompatible
+  # with st_enable, which has no exponential tilt to bound.
+  counterfactual_tanh_scale: 0.0
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

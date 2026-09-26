@@ -14,7 +14,7 @@ export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-/sfs/weka/scratch/nkw3mr/Vision-OPD-O
 
 export TEACHER_MODEL_SOURCE=legacy TEACHER_REGULARIZATION=frozen TEACHER_UPDATE_RATE=0.0
 export COUNTERFACTUAL_NULL_MODE=mean_color COUNTERFACTUAL_EXTRAPOLATION_BETA=4.0
-export ALPHA=0.5 LR=2e-6 MAX_PROMPT_LENGTH=8192 MAX_RESPONSE_LENGTH=1024 DATA_SEED=42
+export ALPHA=0.5 LR="${LR:-2e-6}" MAX_PROMPT_LENGTH=8192 MAX_RESPONSE_LENGTH=1024 DATA_SEED=42
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-48}" PPO_MIMI_BATCH_SIZE="${PPO_MIMI_BATCH_SIZE:-48}" ROLLOUT_N="${ROLLOUT_N:-8}"
 export TRAINER_N_GPUS_PER_NODE="${TRAINER_N_GPUS_PER_NODE:-3}" TRAINER_NNODES=1
 export TRAINER_SAVE_FREQ="${TRAINER_SAVE_FREQ:-5}" TRAINER_TOTAL_EPOCHS="${TRAINER_TOTAL_EPOCHS:-1}" TRAINER_TOTAL_TRAINING_STEPS="${TRAINER_TOTAL_TRAINING_STEPS:-51}"
@@ -22,6 +22,7 @@ export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export ACTOR_USE_DYNAMIC_BSZ=False
 
 echo "${EXPERIMENT_NAME_OVERRIDE}: ST conserved transfer tau=${ST_TAU:-0.10} rho=${ST_RHO:-0.10} amax=${ST_AMAX:-0.50} eps=${ST_EPS:-0.30} (seed42, pair, ${TRAIN_BATCH_SIZE}x n${ROLLOUT_N})"
+echo "  并行配置: n_gpus=${TRAINER_N_GPUS_PER_NODE} ulysses_sp=${ULYSSES_SP:-1} rollout_n=${ROLLOUT_N} lr=${LR}  <- 复现跑必须逐项相同"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.counterfactual_null_scope=last \
     actor_rollout_ref.actor.self_distillation.counterfactual_st_enable=True \
@@ -29,8 +30,8 @@ exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.counterfactual_st_head_ratio="${ST_RHO:-0.10}" \
     actor_rollout_ref.actor.self_distillation.counterfactual_st_alpha_max="${ST_AMAX:-0.50}" \
     actor_rollout_ref.actor.self_distillation.counterfactual_st_eps="${ST_EPS:-0.30}" \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.ref.ulysses_sequence_parallel_size=1 \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \
+    actor_rollout_ref.ref.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.model.enable_activation_offload=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=True \

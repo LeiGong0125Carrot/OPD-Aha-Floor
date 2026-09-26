@@ -120,6 +120,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_st_alpha_max: float = 0.50
     counterfactual_st_eps: float = 0.30
     counterfactual_floor_alpha: float = 0.0
+    counterfactual_tanh_scale: float = 0.0
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -206,6 +207,22 @@ class SelfDistillationConfig(BaseConfig):
                 )
             if not 0.0 < self.counterfactual_st_eps <= 1.0:
                 raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
+        if self.counterfactual_tanh_scale:
+            if self.counterfactual_tanh_scale <= 0.0:
+                raise ValueError(
+                    "self_distillation.counterfactual_tanh_scale must be > 0 when set, "
+                    f"got {self.counterfactual_tanh_scale}"
+                )
+            if self.counterfactual_null_mode is None:
+                raise ValueError(
+                    "self_distillation.counterfactual_tanh_scale requires counterfactual_null_mode "
+                    "(it reshapes u = log p_real - log p_null)"
+                )
+            if self.counterfactual_st_enable:
+                raise ValueError(
+                    "counterfactual_tanh_scale is incompatible with counterfactual_st_enable: "
+                    "ST replaces the exponential tilt entirely, so there is no exp(beta*u) to bound"
+                )
         if self.counterfactual_floor_alpha:
             if not 0.0 < self.counterfactual_floor_alpha < 1.0:
                 raise ValueError(

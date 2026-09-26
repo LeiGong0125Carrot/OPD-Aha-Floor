@@ -1126,9 +1126,14 @@ def compute_self_distillation_loss(
     counterfactual_floor_alpha = float(
         getattr(self_distillation_config, "counterfactual_floor_alpha", 0.0) or 0.0
     )
+    counterfactual_tanh_scale = float(
+        getattr(self_distillation_config, "counterfactual_tanh_scale", 0.0) or 0.0
+    )
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
     floor_clamped_frac_per_token = None
+    tanh_compressed_frac_per_token = None
+    target_max_prob_per_token = None
     st_delta_per_token = st_cov_per_token = st_donor_frac_per_token = None
     st_mass_d_per_token = st_mass_r_per_token = None
 
@@ -1217,6 +1222,32 @@ def compute_self_distillation_loss(
                     st_cov_per_token = st_valid.float()
                     st_donor_frac_per_token = donors.float().sum(dim=-1) / explicit.float().sum(dim=-1).clamp(min=1.0)
             else:
+                if counterfactual_tanh_scale > 0.0:
+                    # Bounded tilt: u <- tau * tanh(u / tau), so exp(beta*u) is confined to
+                    # [exp(-beta*tau), exp(+beta*tau)] instead of being unbounded.
+                    #
+                    # Why: with beta=4 the exponential tilt is dominated by whichever token
+                    # happens to have the largest u -- on a six-token worked example a single
+                    # u=+1.92 token takes 99.76% of the target mass, making q a near-one-hot
+                    # that ignores the rest of the visual contrast. tanh keeps the small-|u|
+                    # regime linear (tau*tanh(u/tau) = u + O(u^3/tau^2)) and only compresses
+                    # the extremes, i.e. it redistributes the tilt rather than removing it.
+                    #
+                    # tanh is odd and strictly increasing, so it preserves sign and order of u.
+                    # That makes it commute with both downstream gates: the floor's (u < 0)
+                    # mask and sup's clamp(max=0) select the same tokens before and after.
+                    # Applying it first is therefore purely a presentation choice.
+                    with torch.no_grad():
+                        # |u| > 2*tau  <=>  tanh has compressed this token by >=3.6%
+                        # (tanh(2) = 0.964). NOT the same as saturation: float32 tanh
+                        # returns exactly +-1 only around |u| ~ 9*tau, and only there is
+                        # the ORDER between extreme tokens destroyed. Read this metric as
+                        # "how much of the distribution is in the nonlinear regime", not
+                        # "how much is pinned at the bound".
+                        tanh_compressed_frac_per_token = (
+                            u_term.abs() > 2.0 * counterfactual_tanh_scale
+                        ).float().mean(dim=-1)
+                    u_term = counterfactual_tanh_scale * torch.tanh(u_term / counterfactual_tanh_scale)
                 if counterfactual_floor_alpha > 0.0:
                     # Plausibility floor (Ren ICLR25 anti-squeeze), ported byte-for-byte from
                     # Vision-OPD-OPSA reconstruct_aha_target: negative u is clamped to 0 on the
@@ -1243,6 +1274,8 @@ def compute_self_distillation_loss(
                     teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
                     dim=-1,
                 )
+            with torch.no_grad():
+                target_max_prob_per_token = teacher_distill_log_probs.exp().amax(dim=-1)
             counterfactual_target_tv_per_token = 0.5 * (
                 teacher_distill_log_probs.exp() - teacher_real_distill_log_probs.exp()
             ).abs().sum(dim=-1)
@@ -1320,6 +1353,14 @@ def compute_self_distillation_loss(
     if sup_frac_u_pos_per_token is not None:
         metrics["self_distillation/sup_frac_u_pos"] = (
             verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count
+        ).detach().item()
+    if tanh_compressed_frac_per_token is not None:
+        metrics["self_distillation/tanh_compressed_frac"] = (
+            verl_F.masked_sum(tanh_compressed_frac_per_token, loss_mask) / valid_token_count
+        ).detach().item()
+    if target_max_prob_per_token is not None:
+        metrics["self_distillation/target_max_prob"] = (
+            verl_F.masked_sum(target_max_prob_per_token, loss_mask) / valid_token_count
         ).detach().item()
     if floor_clamped_frac_per_token is not None:
         metrics["self_distillation/floor_clamped_frac"] = (
