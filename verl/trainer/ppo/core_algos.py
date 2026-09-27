@@ -1129,11 +1129,29 @@ def compute_self_distillation_loss(
     counterfactual_tanh_scale = float(
         getattr(self_distillation_config, "counterfactual_tanh_scale", 0.0) or 0.0
     )
+    _gamma_raw = getattr(self_distillation_config, "counterfactual_target_gamma", None)
+    counterfactual_target_gamma = 1.0 if _gamma_raw is None else float(_gamma_raw)
+    # Runtime guard, NOT a dataclass guard: on this repo's training path main_ppo.py forces
+    # the legacy worker impl, so the actor config stays a plain DictConfig and
+    # SelfDistillationConfig.__post_init__ never runs -- every validation living there is
+    # dead code in production. Without this check, TARGET_GAMMA=-1 would silently train an
+    # INVERTED target (mass on the least likely tokens) for hours with no error, and
+    # TARGET_GAMMA=0 would silently degrade to the identity.
+    if counterfactual_target_gamma <= 0.0:
+        raise ValueError(
+            "self_distillation.counterfactual_target_gamma must be > 0, got "
+            f"{counterfactual_target_gamma} (gamma<=0 inverts or flattens the target)"
+        )
+    if counterfactual_tanh_scale < 0.0:
+        raise ValueError(
+            f"self_distillation.counterfactual_tanh_scale must be >= 0, got {counterfactual_tanh_scale}"
+        )
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
     floor_clamped_frac_per_token = None
     tanh_compressed_frac_per_token = None
     target_max_prob_per_token = None
+    target_entropy_per_token = None
     st_delta_per_token = st_cov_per_token = st_donor_frac_per_token = None
     st_mass_d_per_token = st_mass_r_per_token = None
 
@@ -1274,11 +1292,66 @@ def compute_self_distillation_loss(
                     teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
                     dim=-1,
                 )
+            if counterfactual_target_gamma != 1.0 and counterfactual_st_enable:
+                raise ValueError(
+                    "counterfactual_target_gamma is incompatible with counterfactual_st_enable "
+                    "(ST defines the target's shape by construction; re-sharpening destroys "
+                    "its conservation property)"
+                )
+            if counterfactual_target_gamma != 1.0:
+                # Target sharpness knob, applied AFTER every other target-construction
+                # branch (tilt / floor / sup / ST) has produced q:
+                #
+                #     log q_gamma = log_softmax(gamma * log q)
+                #
+                # gamma = 1 is the exact identity (A arm, bit-identical). Large gamma
+                # drives q to onehot(argmax q) -- with the measured q_max ~= 0.98,
+                # gamma=50 gives a ratio of ~1e85 between the top token and the runner-up,
+                # i.e. numerically a hard label. gamma < 1 flattens q instead.
+                #
+                # Purpose: q already carries ~98% of its mass on a single token
+                # (metric target_max_prob, measured 0.9824 on the A-style target), so the
+                # question this knob answers is whether the remaining ~2% of soft mass
+                # does any work at all. See docs/gamma_sharpening_plan.md.
+                #
+                # Safety: log_softmax subtracts the max, so gamma*log q down at -2500 is
+                # fine; and JSD against a one-hot q stays bounded by log 2 (no log(0)).
+                # Sharpen the EXPLICIT columns only, preserving the tail bucket's mass.
+                # The tail is the aggregated mass outside the student's top-k -- a truncation
+                # artifact, not a token. Sharpening it as if it were one would, at gamma<1,
+                # inflate its share by orders of magnitude (with q ~= [0.93, ..., tail=1e-5],
+                # gamma=0.5 lifts tail/argmax from ~1e-5 to ~3e-3), so the "flatter target"
+                # arm would be telling the student to move mass OUTSIDE its top-k rather than
+                # amplifying the teacher's soft mass -- the exact quantity under test. At
+                # large gamma it would make a hard label on "not in the top-k" wherever the
+                # tail happens to be the argmax.
+                _explicit = torch.ones_like(teacher_distill_log_probs, dtype=torch.bool)
+                if use_topk and self_distillation_config.distillation_add_tail:
+                    _explicit[..., -1] = False
+                _neg_inf = torch.finfo(teacher_distill_log_probs.dtype).min
+                if bool(_explicit.all()):
+                    teacher_distill_log_probs = F.log_softmax(
+                        counterfactual_target_gamma * teacher_distill_log_probs, dim=-1
+                    )
+                else:
+                    _mass = torch.logsumexp(
+                        teacher_distill_log_probs.masked_fill(~_explicit, _neg_inf), dim=-1, keepdim=True
+                    )
+                    _scaled = counterfactual_target_gamma * teacher_distill_log_probs
+                    _z = torch.logsumexp(_scaled.masked_fill(~_explicit, _neg_inf), dim=-1, keepdim=True)
+                    teacher_distill_log_probs = torch.where(
+                        _explicit, _scaled - _z + _mass, teacher_distill_log_probs
+                    )
             with torch.no_grad():
-                target_max_prob_per_token = teacher_distill_log_probs.exp().amax(dim=-1)
+                q_prob = teacher_distill_log_probs.exp()
+                target_max_prob_per_token = q_prob.amax(dim=-1)
+                target_entropy_per_token = -(
+                    q_prob * teacher_distill_log_probs.clamp(min=-1e30)
+                ).sum(dim=-1)
             counterfactual_target_tv_per_token = 0.5 * (
-                teacher_distill_log_probs.exp() - teacher_real_distill_log_probs.exp()
+                q_prob - teacher_real_distill_log_probs.exp()
             ).abs().sum(dim=-1)
+            del q_prob
         else:
             teacher_distill_log_probs = teacher_real_distill_log_probs
 
@@ -1357,6 +1430,10 @@ def compute_self_distillation_loss(
     if tanh_compressed_frac_per_token is not None:
         metrics["self_distillation/tanh_compressed_frac"] = (
             verl_F.masked_sum(tanh_compressed_frac_per_token, loss_mask) / valid_token_count
+        ).detach().item()
+    if target_entropy_per_token is not None:
+        metrics["self_distillation/target_entropy"] = (
+            verl_F.masked_sum(target_entropy_per_token, loss_mask) / valid_token_count
         ).detach().item()
     if target_max_prob_per_token is not None:
         metrics["self_distillation/target_max_prob"] = (

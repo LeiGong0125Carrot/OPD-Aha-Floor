@@ -178,6 +178,12 @@ self_distillation:
   # with st_enable, which has no exponential tilt to bound.
   counterfactual_tanh_scale: 0.0
 
+  # Target sharpness: log q <- log_softmax(gamma * log q), applied after every other
+  # target-construction branch. 1.0 = exact identity. Large gamma (50) => hard label at
+  # argmax q; gamma < 1 => flatter target. Answers whether the ~2% of soft mass in q
+  # does any work (measured target_max_prob ~= 0.98). Incompatible with st_enable.
+  counterfactual_target_gamma: 1.0
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

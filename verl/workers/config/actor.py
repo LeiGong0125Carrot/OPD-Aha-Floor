@@ -121,6 +121,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_st_eps: float = 0.30
     counterfactual_floor_alpha: float = 0.0
     counterfactual_tanh_scale: float = 0.0
+    counterfactual_target_gamma: float = 1.0
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -207,6 +208,23 @@ class SelfDistillationConfig(BaseConfig):
                 )
             if not 0.0 < self.counterfactual_st_eps <= 1.0:
                 raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
+        if self.counterfactual_target_gamma != 1.0:
+            if self.counterfactual_target_gamma <= 0.0:
+                raise ValueError(
+                    "self_distillation.counterfactual_target_gamma must be > 0, "
+                    f"got {self.counterfactual_target_gamma}"
+                )
+            if self.counterfactual_null_mode is None:
+                raise ValueError(
+                    "self_distillation.counterfactual_target_gamma requires "
+                    "counterfactual_null_mode (it reshapes the counterfactual target q)"
+                )
+            if self.counterfactual_st_enable:
+                raise ValueError(
+                    "counterfactual_target_gamma is incompatible with counterfactual_st_enable: "
+                    "ST's conserved transfer defines the target's shape by construction, so "
+                    "re-sharpening it afterwards destroys the conservation property"
+                )
         if self.counterfactual_tanh_scale:
             if self.counterfactual_tanh_scale <= 0.0:
                 raise ValueError(
