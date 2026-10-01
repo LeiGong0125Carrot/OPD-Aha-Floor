@@ -1,0 +1,50 @@
+# Implementation template, NOT a ready-to-launch training configuration.
+# Null values must be inherited from a verified baseline manifest or explicitly locked.
+version: 1
+status: candidate_unvalidated_on_vlm
+mode: temporal_visual_risk_ppo
+seed: 42
+
+inherit:
+  repository_root: null
+  baseline_manifest: null
+  student_checkpoint: null
+  frozen_teacher_checkpoint: null
+  train_data_manifest: null
+  processor_manifest: null
+  sampling_spec: null
+  optimizer_manifest: null
+  rollout_count_per_prompt: null
+  update_budget: null
+  evaluation_manifest: null
+
+feedback:
+  cost_kind: probability_gap
+  teacher_scoring_temperature: null
+  risk_transform: bounded_slope
+  gamma: null
+  baseline: leave_one_out_time_aligned_absorbing
+  truncation: observed_prefix_only
+
+optimization:
+  clip_epsilon: null
+  ppo_epochs: null
+  advantage_normalization: none
+  loss_reduction: token_mean
+
+anchor:
+  enabled: null
+  weight: null
+  # Proposed adapter, not a claim about the current repository.
+  support: fixed_snapshot_topk_tail
+  topk: 100
+
+constraints:
+  keep_original_student_rollout: true
+  teacher_views: [privileged, matched_mean_rgb_null]
+  extra_lookahead_rollouts: 0
+  add_critic: false
+  add_attention_module: false
+  add_gu_to_ppo: false
+  standalone_scientific_probes: false
+  multi_seed_sweep: false

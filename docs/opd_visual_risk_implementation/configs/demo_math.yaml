@@ -1,0 +1,8 @@
+# Only for reproducing worked scalar/tensor examples. Not training recommendations.
+mode: cpu_math_demo
+cost_kind: probability_gap
+risk_transform: bounded_slope
+gamma: 1.0
+clip_epsilon: 0.2
+anchor_weight: 0.1
+loss_reduction: token_mean
