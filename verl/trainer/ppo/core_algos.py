@@ -1095,6 +1095,7 @@ def compute_self_distillation_loss(
     teacher_topk_log_probs: Optional[torch.Tensor] = None,
     teacher_null_all_log_probs: Optional[torch.Tensor] = None,
     teacher_null_topk_log_probs: Optional[torch.Tensor] = None,
+    teacher_null_log_probs: Optional[torch.Tensor] = None,
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
@@ -1146,6 +1147,47 @@ def compute_self_distillation_loss(
         raise ValueError(
             f"self_distillation.counterfactual_tanh_scale must be >= 0, got {counterfactual_tanh_scale}"
         )
+    counterfactual_hist_adaptive_beta = bool(
+        getattr(self_distillation_config, "counterfactual_hist_adaptive_beta", False)
+    )
+    counterfactual_hist_alpha = float(
+        getattr(self_distillation_config, "counterfactual_hist_alpha", 1.0) or 1.0
+    )
+    counterfactual_hist_shuffle = bool(
+        getattr(self_distillation_config, "counterfactual_hist_shuffle", False)
+    )
+    counterfactual_future_weight = bool(
+        getattr(self_distillation_config, "counterfactual_future_weight", False)
+    )
+    counterfactual_future_alpha = float(
+        getattr(self_distillation_config, "counterfactual_future_alpha", 1.0) or 1.0
+    )
+    _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
+    if _nh_any:
+        # Runtime guards (the dataclass __post_init__ never runs on this training path --
+        # main_ppo forces the legacy worker impl, so the config stays a plain DictConfig).
+        if not counterfactual_u_clip_pos:
+            raise ValueError(
+                "negative-history gates (hist_adaptive_beta / future_weight) require "
+                "counterfactual_u_clip_pos=True: the design builds on the negative-only tilt "
+                "q ∝ p+ · exp(beta_t · min(u, 0)) (docs/negative_history/03)."
+            )
+        if teacher_null_log_probs is None:
+            raise ValueError(
+                "negative-history gates require teacher_null_log_probs (realized-token null "
+                "log-probs, [B,T]) -- plumbed from dp_actor's teacher_null forward."
+            )
+        if counterfactual_st_enable or counterfactual_floor_alpha > 0.0 \
+                or counterfactual_tanh_scale > 0.0 or counterfactual_target_gamma != 1.0:
+            raise ValueError(
+                "negative-history gates are mutually exclusive with st_enable / floor_alpha / "
+                "tanh_scale / target_gamma (single-variable discipline)."
+            )
+    if counterfactual_hist_shuffle and not counterfactual_hist_adaptive_beta:
+        raise ValueError(
+            "counterfactual_hist_shuffle is the misalign CONTROL for hist_adaptive_beta and "
+            "requires it to be enabled."
+        )
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
     floor_clamped_frac_per_token = None
@@ -1154,6 +1196,69 @@ def compute_self_distillation_loss(
     target_entropy_per_token = None
     st_delta_per_token = st_cov_per_token = st_donor_frac_per_token = None
     st_mass_d_per_token = st_mass_r_per_token = None
+
+    # ---- Negative-history trajectory branch (docs/negative_history/02-05) ----
+    # Two parallel views of the same visual signal: the vocabulary-level u_t(v) reshapes
+    # the target (existing code below); the realized-token u_t(y_t) describes the sampled
+    # trajectory's state and is computed here from exact [B,T] realized log-probs
+    # (immune to the sampled token falling outside the top-k support).
+    nh_beta_t = None          # [B,T] adaptive suppression strength (arm C/E)
+    nh_weight = None          # [B,T] future-persistence JSD weight  (arm D/E)
+    nh_c_mean = nh_c_frac_pos = nh_N_last_mean = None
+    nh_s_mean = nh_beta_t_mean = nh_w_mean = nh_w_p90 = None
+    if _nh_any:
+        with torch.no_grad():
+            # c_t = [-u_t(y_t)]_+  (02 §6); padding never enters (02 §11)
+            u_realized = teacher_log_probs - teacher_null_log_probs
+            # torch.where, not "* loss_mask": a non-finite realized log-prob at a padded
+            # position gives inf*0 = NaN, and the reverse cumsum for the future weight would
+            # then smear that NaN backwards onto every valid position of the row.
+            nh_c = torch.where(loss_mask > 0, torch.relu(-u_realized), torch.zeros_like(u_realized))
+            nh_c_mean = (verl_F.masked_sum(nh_c, loss_mask) / loss_mask.sum().clamp(min=1.0)).item()
+            nh_c_frac_pos = (
+                verl_F.masked_sum((nh_c > 0).float(), loss_mask) / loss_mask.sum().clamp(min=1.0)
+            ).item()
+            if counterfactual_hist_adaptive_beta:
+                c_hist = nh_c
+                if counterfactual_hist_shuffle:
+                    # Misalign CONTROL: permute c within each row's valid span -- preserves
+                    # the marginal distribution, destroys temporal alignment. If arm C's gain
+                    # survives this shuffle, it is a perturbation-magnitude artifact
+                    # (the C-temporal lesson), not temporal credit.
+                    c_hist = nh_c.clone()
+                    for _b in range(c_hist.shape[0]):
+                        _idx = loss_mask[_b].nonzero(as_tuple=True)[0]
+                        if _idx.numel() > 1:
+                            _perm = _idx[torch.randperm(_idx.numel(), device=_idx.device)]
+                            c_hist[_b, _idx] = nh_c[_b, _perm]
+                # N_t = sum_{k<t} c_k (EXCLUSIVE, 04 §4); s = N/(1+N); beta_t = beta(1+a_H s)
+                nh_N = torch.cumsum(c_hist, dim=1) - c_hist
+                nh_s = nh_N / (1.0 + nh_N)
+                nh_beta_t = counterfactual_extrapolation_beta * (
+                    1.0 + counterfactual_hist_alpha * nh_s
+                )
+                _lens = loss_mask.sum(dim=1)
+                _last = _lens.clamp(min=1).long() - 1
+                _rows = _lens > 0          # rows fully masked by self_distillation_mask excluded
+                nh_N_last_mean = (
+                    nh_N.gather(1, _last.unsqueeze(1)).squeeze(1)[_rows].mean().item()
+                    if _rows.any() else 0.0
+                )
+                nh_s_mean = (verl_F.masked_sum(nh_s, loss_mask) / loss_mask.sum().clamp(min=1.0)).item()
+                nh_beta_t_mean = (
+                    verl_F.masked_sum(nh_beta_t, loss_mask) / loss_mask.sum().clamp(min=1.0)
+                ).item()
+            if counterfactual_future_weight:
+                # Exclusive suffix mean (05 §5-§6): Fbar_t = (sum_{k>t} c_k) / K_t, K_t=0 -> w=1
+                _rev = lambda x: x.flip(1).cumsum(dim=1).flip(1)
+                nh_F = _rev(nh_c) - nh_c
+                nh_K = _rev(loss_mask) - loss_mask
+                nh_Fbar = nh_F / nh_K.clamp(min=1.0)
+                nh_r = nh_Fbar / (1.0 + nh_Fbar)
+                nh_weight = (1.0 + counterfactual_future_alpha * nh_r) * loss_mask
+                _wv = nh_weight[loss_mask > 0]
+                nh_w_mean = _wv.mean().item() if _wv.numel() else 1.0
+                nh_w_p90 = _wv.quantile(0.9).item() if _wv.numel() else 1.0
 
     if self_distillation_config.full_logit_distillation:
         use_topk = self_distillation_config.distillation_topk is not None
@@ -1288,8 +1393,12 @@ def compute_self_distillation_loss(
                     with torch.no_grad():
                         sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
                     u_term = torch.clamp(u_term, max=0.0)
+                _beta_eff = (
+                    nh_beta_t.unsqueeze(-1) if nh_beta_t is not None
+                    else counterfactual_extrapolation_beta
+                )
                 teacher_distill_log_probs = F.log_softmax(
-                    teacher_real_distill_log_probs + counterfactual_extrapolation_beta * u_term,
+                    teacher_real_distill_log_probs + _beta_eff * u_term,
                     dim=-1,
                 )
             if counterfactual_target_gamma != 1.0 and counterfactual_st_enable:
@@ -1427,6 +1536,16 @@ def compute_self_distillation_loss(
         metrics["self_distillation/sup_frac_u_pos"] = (
             verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count
         ).detach().item()
+    if nh_c_mean is not None:
+        metrics["self_distillation/nh_c_mean"] = nh_c_mean
+        metrics["self_distillation/nh_c_frac_pos"] = nh_c_frac_pos
+    if nh_N_last_mean is not None:
+        metrics["self_distillation/nh_N_last_mean"] = nh_N_last_mean
+        metrics["self_distillation/nh_s_mean"] = nh_s_mean
+        metrics["self_distillation/nh_beta_t_mean"] = nh_beta_t_mean
+    if nh_w_mean is not None:
+        metrics["self_distillation/nh_w_mean"] = nh_w_mean
+        metrics["self_distillation/nh_w_p90"] = nh_w_p90
     if tanh_compressed_frac_per_token is not None:
         metrics["self_distillation/tanh_compressed_frac"] = (
             verl_F.masked_sum(tanh_compressed_frac_per_token, loss_mask) / valid_token_count
@@ -1455,11 +1574,24 @@ def compute_self_distillation_loss(
                 verl_F.masked_sum(_t, loss_mask) / valid_token_count
             ).detach().item()
 
+    agg_mask = loss_mask
+    agg_num_tokens = batch_num_tokens
+    if nh_weight is not None:
+        # Weighted JSD (05 §14): L = sum(M w l) / sum(M w). masked_sum multiplies by the
+        # mask, so passing M*w as the mask gives the weighted numerator; the denominator
+        # must be the WEIGHTED count -- batch_num_tokens was already defaulted to the
+        # unweighted loss_mask.sum() above, so override it here.
+        # Rescale rather than replace batch_num_tokens: if a GLOBAL token count was passed
+        # in, replacing it with a local weighted sum would change the loss scale by dp_size.
+        agg_mask = loss_mask * nh_weight
+        agg_num_tokens = batch_num_tokens * (
+            agg_mask.sum() / loss_mask.sum().clamp(min=1.0)
+        ).clamp(min=1e-6)
     loss = agg_loss(
         loss_mat=weighted_per_token_loss,
-        loss_mask=loss_mask,
+        loss_mask=agg_mask,
         loss_agg_mode=loss_agg_mode,
-        batch_num_tokens=batch_num_tokens,
+        batch_num_tokens=agg_num_tokens,
         global_batch_size=global_batch_size,
         loss_scale_factor=loss_scale_factor,
     )

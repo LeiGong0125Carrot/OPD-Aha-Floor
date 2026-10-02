@@ -1048,6 +1048,7 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
                         teacher_null_all_logps = None
                         teacher_null_topk_logps = None
+                        teacher_null_log_prob = None
                         counterfactual_null_mode = self_distillation_cfg.get("counterfactual_null_mode", None)
                         if counterfactual_null_mode is not None:
                             if "teacher_null_multi_modal_inputs" not in model_inputs:
@@ -1080,6 +1081,12 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_null_topk_logps = (
                                 teacher_null_outputs.get("topk_logps") if distill_topk else None
                             )
+                            # Realized-token null log-prob [B,T]: same _forward_micro_batch
+                            # output family as teacher_log_prob, so alignment/shift match by
+                            # construction. Needed by the negative-history trajectory branch
+                            # (c_t = relu(-(log p+ - log p0)) at the sampled token) -- exact,
+                            # and immune to the sampled token falling outside the top-k support.
+                            teacher_null_log_prob = teacher_null_outputs["log_probs"]
                         if self_distillation_cfg.get("log_prob_dump_dir", None):
                             if distill_topk:
                                 student_distill_log_probs = student_topk_logps
@@ -1118,6 +1125,7 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_topk_log_probs=teacher_topk_logps,
                             teacher_null_all_log_probs=teacher_null_all_logps,
                             teacher_null_topk_log_probs=teacher_null_topk_logps,
+                            teacher_null_log_probs=teacher_null_log_prob,
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,

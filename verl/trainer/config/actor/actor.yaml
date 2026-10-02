@@ -184,6 +184,20 @@ self_distillation:
   # does any work (measured target_max_prob ~= 0.98). Incompatible with st_enable.
   counterfactual_target_gamma: 1.0
 
+  # Negative-history gates (docs/negative_history/02-07). Both build on the negative-only
+  # tilt and require counterfactual_u_clip_pos=true; mutually exclusive with st/floor/tanh/gamma.
+  # hist_adaptive_beta: beta_t = beta * (1 + hist_alpha * N_t/(1+N_t)), N_t = exclusive cumsum
+  #   of realized conflict c_t = relu(-(log p+ - log p0))(y_t)  -> arm C.
+  # hist_shuffle: misalign CONTROL -- permutes c_t within each response (marginal kept,
+  #   temporal order destroyed); only meaningful with hist_adaptive_beta.
+  # future_weight: w_t = 1 + future_alpha * Fbar/(1+Fbar), Fbar = exclusive suffix mean of
+  #   c; JSD aggregated as sum(M w l)/sum(M w)  -> arm D.
+  counterfactual_hist_adaptive_beta: false
+  counterfactual_hist_alpha: 1.0
+  counterfactual_hist_shuffle: false
+  counterfactual_future_weight: false
+  counterfactual_future_alpha: 1.0
+
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null
 

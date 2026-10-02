@@ -122,6 +122,11 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_floor_alpha: float = 0.0
     counterfactual_tanh_scale: float = 0.0
     counterfactual_target_gamma: float = 1.0
+    counterfactual_hist_adaptive_beta: bool = False
+    counterfactual_hist_alpha: float = 1.0
+    counterfactual_hist_shuffle: bool = False
+    counterfactual_future_weight: bool = False
+    counterfactual_future_alpha: float = 1.0
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -208,6 +213,23 @@ class SelfDistillationConfig(BaseConfig):
                 )
             if not 0.0 < self.counterfactual_st_eps <= 1.0:
                 raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
+        if self.counterfactual_hist_adaptive_beta or self.counterfactual_future_weight:
+            if not self.counterfactual_u_clip_pos:
+                raise ValueError(
+                    "negative-history gates require counterfactual_u_clip_pos=True "
+                    "(the design builds on the negative-only tilt)"
+                )
+            if self.counterfactual_st_enable or self.counterfactual_floor_alpha \
+                    or self.counterfactual_tanh_scale or self.counterfactual_target_gamma != 1.0:
+                raise ValueError(
+                    "negative-history gates are mutually exclusive with st_enable / "
+                    "floor_alpha / tanh_scale / target_gamma (single-variable discipline)"
+                )
+        if self.counterfactual_hist_shuffle and not self.counterfactual_hist_adaptive_beta:
+            raise ValueError(
+                "counterfactual_hist_shuffle is the misalign control for "
+                "counterfactual_hist_adaptive_beta and requires it enabled"
+            )
         if self.counterfactual_target_gamma != 1.0:
             if self.counterfactual_target_gamma <= 0.0:
                 raise ValueError(

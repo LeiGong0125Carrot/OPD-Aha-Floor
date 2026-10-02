@@ -1,0 +1,23 @@
+{
+  "root_markdown_sections_including_index": 17,
+  "document_lines": 1285,
+  "document_bytes": 73738,
+  "local_links_and_code_fences": "passed",
+  "cpu_unit_tests": {
+    "passed": 32,
+    "failed": 0,
+    "command": "python -m pytest -q"
+  },
+  "config_template_check": "expected fail: required values intentionally unset; exit code 2",
+  "numeric_example_reproduced": true,
+  "vlm_training_run": false,
+  "gpu_or_distributed_integration_test": false,
+  "user_repository_modified": false,
+  "environment": {
+    "python": "3.13.5",
+    "torch": "2.10.0+cpu",
+    "pytest": "9.0.2",
+    "PyYAML": "6.0.3"
+  },
+  "scope": "Math reference and implementation documents only. Not a full trainer."
+}

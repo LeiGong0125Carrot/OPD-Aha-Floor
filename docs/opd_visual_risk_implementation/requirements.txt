@@ -1,0 +1,4 @@
+# Numerical reference only. Use the project's tested Python/PyTorch environment.
+torch
+pytest
+PyYAML

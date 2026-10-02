@@ -1,0 +1,159 @@
+{
+  "files": [
+    {
+      "path": "00_README.md",
+      "bytes": 5152,
+      "sha256": "1ad2a5b9c5bf335b676127b3bd8edb6169b051c49986da63d95e850dde31d592"
+    },
+    {
+      "path": "01_scope_and_method_spec.md",
+      "bytes": 4396,
+      "sha256": "cea16c984611939256e0da6d667eb66bd196fcf09e1644a45b288b036e3c94e8"
+    },
+    {
+      "path": "02_rollout_data_contract.md",
+      "bytes": 5732,
+      "sha256": "910339ec463be38eb66c399ec5921aa21b36d946d0d17ef90735500795f7919d"
+    },
+    {
+      "path": "03_teacher_scoring_and_cost.md",
+      "bytes": 4061,
+      "sha256": "5dce99e3d4597ff14ba0eef05c731ff32c801da23f9d1d759302c9ff7c1748e6"
+    },
+    {
+      "path": "04_history_risk_transform.md",
+      "bytes": 3477,
+      "sha256": "b49d16cc88d99eef2c186282d5ebc9365e3e932cc4da8cab6ed3fab53db447a6"
+    },
+    {
+      "path": "05_future_credit_assignment.md",
+      "bytes": 4093,
+      "sha256": "e1281196d37278142c48f7ee1f7032e069a606b667d8bf1da9384296d4145d4a"
+    },
+    {
+      "path": "06_group_baseline_advantage.md",
+      "bytes": 4214,
+      "sha256": "480d60c631410e9f44a2a2955e711355451f7004caa0d489f5a6eb01683d9ff7"
+    },
+    {
+      "path": "07_ppo_clip_update.md",
+      "bytes": 4130,
+      "sha256": "42c19475a5cec355ac15686546c272340948598c71602293b8ca3fcb5ed23c20"
+    },
+    {
+      "path": "08_reference_anchor_jsd.md",
+      "bytes": 3896,
+      "sha256": "05948827e2c621076c1f08e40f9943ee59e8c5b47ce4f32f2390dfeacce26404"
+    },
+    {
+      "path": "09_end_to_end_training_loop.md",
+      "bytes": 5407,
+      "sha256": "df9d1f07c4819d9a52f723b0f66c41c1aebfbaa89333a06e315e571591d4f72c"
+    },
+    {
+      "path": "10_gu_alternative.md",
+      "bytes": 2678,
+      "sha256": "d53bdd9885156446c2aca2ae3a8065ed15e4bfc02edaa237776277a5cc9528d4"
+    },
+    {
+      "path": "11_config_and_training_variants.md",
+      "bytes": 4141,
+      "sha256": "929d146a8ff5894def7307b20aab86a166ab1e3ea833da712bc07e11eeb37fae"
+    },
+    {
+      "path": "12_tests_and_failure_monitoring.md",
+      "bytes": 4155,
+      "sha256": "68df884b00b19d93324210244e4c30bdbf0919ae6cf88540fb882ef3cc195c6a"
+    },
+    {
+      "path": "13_repository_integration_tasks.md",
+      "bytes": 3835,
+      "sha256": "0f2fcfc18c35fbf72a13fbd5cbb599d9a660010787e8b4c1b4c3d9ff707155f6"
+    },
+    {
+      "path": "14_worked_numeric_example.md",
+      "bytes": 4436,
+      "sha256": "a87fdcd7612fd8782fd6bef99c24f5c48be87f30ea58c30fee7fce764e33542c"
+    },
+    {
+      "path": "15_objective_semantics_and_risks.md",
+      "bytes": 5101,
+      "sha256": "ebd84e7a449176c8f8e1520d260290734726dda7a1dfcab0a2bae539d8e29643"
+    },
+    {
+      "path": "16_sources_and_decision_register.md",
+      "bytes": 4834,
+      "sha256": "3cc7cbc3f3d4b2904ba6e3f5df7b16dba69127f10b9d336899580fc27778318b"
+    },
+    {
+      "path": "configs/demo_math.yaml",
+      "bytes": 236,
+      "sha256": "450bf73eed162ce86fb7a74bd375c4c6ea611e97be52fb5c6461c73b9d056d01"
+    },
+    {
+      "path": "configs/train_plan.yaml",
+      "bytes": 1303,
+      "sha256": "9ed5cb59c183c06b3422051b34b6a49d7779bc158813ce3eec400d277ba44b4f"
+    },
+    {
+      "path": "examples/worked_example.json",
+      "bytes": 2402,
+      "sha256": "c8cf392e859fb2962d02a9f9cf9728e6c8fa2bc5e626ecf686c95cde79e344b1"
+    },
+    {
+      "path": "pytest.ini",
+      "bytes": 56,
+      "sha256": "37b7898dd0df68d7bacac4726b4836010200403a1abe9542fe229caebe39b8a3"
+    },
+    {
+      "path": "reference/__init__.py",
+      "bytes": 76,
+      "sha256": "5dbb9e44d8ce50e8f2d68d32daaa992f60e3b53a861e00766101ef8c35b48281"
+    },
+    {
+      "path": "reference/check_config.py",
+      "bytes": 4306,
+      "sha256": "92ff4c7e3e7fccde31af308ce366affedc5a223112c44f0b219bae3e2744405e"
+    },
+    {
+      "path": "reference/generate_example.py",
+      "bytes": 2207,
+      "sha256": "0c2bbfbb2465b1e57c7dd97a24f9aa0af436e1511b5876b4460b48ff0804cd63"
+    },
+    {
+      "path": "reference/math_core.py",
+      "bytes": 9527,
+      "sha256": "532281642205d0448bcfe7ffd07b475c00b7e3d41c664014de8789154aded3b0"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 101,
+      "sha256": "880310c0edf8e97f5dc9ec4cbfdd19cf695b644a6f3c6b9ebffd81def09943b8"
+    },
+    {
+      "path": "tests/test_config.py",
+      "bytes": 1423,
+      "sha256": "c81ea13c2fcd0c1d79da0c04cf6bf6fd7cc1fc6ad8834f1b694d164333c8cd16"
+    },
+    {
+      "path": "tests/test_math_core.py",
+      "bytes": 7695,
+      "sha256": "4d1b0bef96aaef7bdcddc481aad8348dc52838e69b10bdc049f84febf2418857"
+    },
+    {
+      "path": "validation/config_template_check.txt",
+      "bytes": 654,
+      "sha256": "aadcaff460593f0d09f64d22a77b2b7f2cda4b0881d772bfc8448d2ebff52ce3"
+    },
+    {
+      "path": "validation/test_results.txt",
+      "bytes": 99,
+      "sha256": "6644d3dca4fdee4775cf60b1ee0bc6b44d4a0f03fde768561cf6b8fb912891a8"
+    },
+    {
+      "path": "validation/validation_report.json",
+      "bytes": 696,
+      "sha256": "70636691aacefb8e0d0335a04ced35ade09c34e4e84db3ed7c66b4fc37e26758"
+    }
+  ]
+}
