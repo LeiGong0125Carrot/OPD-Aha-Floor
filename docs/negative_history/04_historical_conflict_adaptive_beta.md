@@ -8,23 +8,22 @@ The design principle is:
 
 > Current visual evidence decides **which tokens should be suppressed**; historical visual conflict decides **how strongly the suppression should be applied**.
 
-This section does **not** introduce future reaction. Future information is intentionally deferred to a later section.
+This section does **not** introduce future reaction. Future information is intentionally deferred to Section 05.
 
 The core quantities are:
 
 - \(N_t\) = cumulative negative path length,
-- \(z_t\) = length-controlled historical severity,
 - \(s_t\) = bounded history state,
 - \(\beta_t\) = state-adaptive suppression strength,
 - future reaction = not included in this section.
 
-This is a candidate extension of OPD-Aha rather than a claim already established by the original paper.
+The previous square-root length normalization is intentionally removed for the spatial-reasoning setting, where trajectories are typically only a few hundred tokens rather than extremely long reasoning traces.
 
 ---
 
 ## 2. Local negative visual evidence from Section 03
 
-For each response position \(t\), OPD-Aha provides the real-vs-null visual preference
+For each response position \(t\), define the OPD-Aha real-vs-null visual preference
 
 \[
 u_t(v)
@@ -72,8 +71,6 @@ Thus:
 - \(c_t>0\): the realized token receives negative visual evidence;
 - larger \(c_t\): stronger relative suppression under privileged visual evidence.
 
-The historical module operates only on the realized trajectory statistics \(c_t\).
-
 ---
 
 ## 3. Why history should affect magnitude rather than direction
@@ -110,31 +107,29 @@ c_t=0.5.
 
 The current negative direction is identical in both states, but State B represents a trajectory that has already accumulated substantial visual opposition.
 
-Therefore the method should not redefine which current tokens are negative. Instead it should increase the strength of the current negative-only reconstruction when historical conflict is larger.
-
-Conceptually:
+Therefore:
 
 \[
 n_t(v)
 \rightarrow
-\text{suppression direction}
+\text{suppression direction},
 \]
 
 while
 
 \[
-H_t
+N_t
 \rightarrow
 \text{suppression magnitude}.
 \]
 
-This separation prevents past mistakes from making currently non-negative tokens negative by construction.
+Past mistakes should not make currently non-negative tokens negative by construction.
 
 ---
 
-## 4. Raw cumulative negative path length
+## 4. Cumulative negative path length
 
-Define the exclusive historical accumulation
+Define the **exclusive** historical accumulation
 
 \[
 \boxed{
@@ -156,9 +151,9 @@ It asks:
 
 > Before entering response position \(t\), how much negative real-vs-null visual evidence has the student's realized trajectory accumulated in total?
 
-The accumulation must be **exclusive**: \(c_t\) is not included when computing \(N_t\).
+The accumulation must be exclusive: \(c_t\) is not included when computing \(N_t\).
 
-This preserves the decomposition:
+This preserves the decomposition
 
 \[
 \text{past}
@@ -204,160 +199,63 @@ then
 N_t=2.2.
 \]
 
-The second trajectory has traveled farther along the visual-opposed direction.
+The second trajectory has traveled farther along the visually opposed direction.
 
 ---
 
-## 5. Why raw accumulation alone is not enough
+## 5. Why the main design no longer normalizes history by response length
 
-Raw accumulation mixes conflict severity with response length.
-
-Consider three trajectories:
-
-| trajectory | valid past length \(L_t\) | cumulative negative evidence \(N_t\) | mean \(N_t/L_t\) |
-|---|---:|---:|---:|
-| A: short, concentrated conflict | 4 | 0.8 | 0.20 |
-| B: long, sparse conflict | 16 | 0.8 | 0.05 |
-| C: long, persistent conflict | 16 | 3.2 | 0.20 |
-
-Raw accumulation cannot distinguish A from B:
+An earlier candidate used
 
 \[
-N_A=N_B=0.8.
+\frac{N_t}{\sqrt{L_t}},
 \]
 
-Full length normalization cannot distinguish A from C:
+where \(L_t\) is the number of previous valid response tokens.
+
+That normalization is useful when trajectories vary over very large length scales. In the target spatial-reasoning setting, responses are typically only a few hundred tokens, so extreme long-horizon growth is not the dominant concern.
+
+More importantly, history is intended to represent:
+
+> **How far has the student already traveled along a visually opposed trajectory?**
+
+Duration is therefore part of the signal rather than a nuisance variable.
+
+For example:
+
+### Early deviation
 
 \[
-\frac{N_A}{L_A}
-=
-\frac{N_C}{L_C}
-=
-0.20.
+N_t=0.3.
 \]
 
-The desired qualitative ordering is
+### Sustained deviation
 
 \[
-B < A < C,
+N_t=2.0.
 \]
 
-because B contains sparse conflict, A contains concentrated short-term conflict, and C contains persistent long-term conflict.
+### Severe accumulated deviation
+
+\[
+N_t=5.0.
+\]
+
+The increasing cumulative quantity is exactly what the historical module is intended to preserve.
+
+Therefore the main history state uses raw \(N_t\) and controls its scale only through a bounded transform.
 
 ---
 
-## 6. Length-controlled historical severity
+## 6. Bounded history state
 
-The main candidate normalization is
-
-\[
-\boxed{
-z_t
-=
-\frac{N_t}
-{\sqrt{\max(L_t,1)}}
-}
-\]
-
-where \(L_t\) is the number of valid response tokens before position \(t\).
-
-This quantity is called the **length-controlled historical severity**.
-
-The square-root normalization is chosen as a compromise between:
-
-### No normalization
-
-\[
-N_t
-\]
-
-which grows linearly with persistent sequence length, and
-
-### Full mean normalization
-
-\[
-\frac{N_t}{L_t}
-\]
-
-which removes duration information completely.
-
-If average conflict intensity is approximately \(\mu\), then
-
-\[
-N_t\approx\mu L_t.
-\]
-
-Therefore
-
-\[
-z_t
-\approx
-\mu\sqrt{L_t},
-\]
-
-which preserves persistence but reduces linear length growth.
-
-### Worked example
-
-Trajectory A:
-
-\[
-N_A=0.8,\quad L_A=4,
-\]
-
-so
-
-\[
-z_A=\frac{0.8}{2}=0.40.
-\]
-
-Trajectory B:
-
-\[
-N_B=0.8,\quad L_B=16,
-\]
-
-so
-
-\[
-z_B=\frac{0.8}{4}=0.20.
-\]
-
-Trajectory C:
-
-\[
-N_C=3.2,\quad L_C=16,
-\]
-
-so
-
-\[
-z_C=\frac{3.2}{4}=0.80.
-\]
-
-Therefore
-
-\[
-\boxed{
-z_B < z_A < z_C
-}
-\]
-
-as desired.
-
----
-
-## 7. Bounded history state
-
-Although square-root normalization reduces length growth, \(z_t\) can still increase without bound.
-
-To prevent historical conflict from producing unbounded reconstruction strength, map it to
+Map the cumulative path length directly to
 
 \[
 \boxed{
 s_t
 =
-\frac{z_t}{1+z_t}
+\frac{N_t}{1+N_t}
 }
 \]
 
@@ -369,51 +267,68 @@ with
 
 This quantity is called the **bounded history state**.
 
-### Example
+It has three useful properties:
 
-For the three trajectories:
+1. monotonicity:
+   \[
+   N_t\uparrow
+   \Rightarrow
+   s_t\uparrow;
+   \]
+2. no additional threshold, window, or decay hyperparameter;
+3. boundedness:
+   \[
+   N_t\rightarrow\infty
+   \Rightarrow
+   s_t\rightarrow1.
+   \]
+
+### Worked example
+
+For
 
 \[
-z_B=0.20
-\Rightarrow
-s_B=\frac{0.20}{1.20}\approx0.167,
+N_t=0.3,
 \]
 
 \[
-z_A=0.40
-\Rightarrow
-s_A=\frac{0.40}{1.40}\approx0.286,
+s_t
+=
+\frac{0.3}{1.3}
+\approx0.231.
+\]
+
+For
+
+\[
+N_t=2.0,
 \]
 
 \[
-z_C=0.80
-\Rightarrow
-s_C=\frac{0.80}{1.80}\approx0.444.
+s_t
+=
+\frac{2}{3}
+\approx0.667.
 \]
 
-The ordering remains
+For
 
 \[
-s_B<s_A<s_C.
+N_t=5.0,
 \]
-
-Even if
 
 \[
-z_t\rightarrow\infty,
+s_t
+=
+\frac{5}{6}
+\approx0.833.
 \]
 
-the transformed state satisfies
-
-\[
-s_t\rightarrow1.
-\]
-
-No extra threshold or decay hyperparameter is required.
+Thus historical severity increases with cumulative conflict while remaining bounded.
 
 ---
 
-## 8. State-adaptive suppression strength
+## 7. State-adaptive suppression strength
 
 Let \(\beta\) denote the base negative-only reconstruction strength.
 
@@ -425,18 +340,18 @@ Define
 =
 \beta
 \left(
-1+\alpha s_t
+1+\alpha_H s_t
 \right)
 }
 \]
 
-where \(\alpha\ge0\) controls the maximum additional historical amplification.
+where \(\alpha_H\ge0\) controls the maximum additional historical amplification.
 
-For the zero-extra-hyperparameter version, fix
+For the first zero-extra-hyperparameter variant, fix
 
 \[
 \boxed{
-\alpha=1.
+\alpha_H=1.
 }
 \]
 
@@ -454,9 +369,9 @@ Then
 
 This guarantees:
 
-1. current negative evidence is still active when history is zero;
+1. current negative evidence is active even when history is zero;
 2. historical conflict can strengthen suppression;
-3. historical amplification is bounded.
+3. historical amplification cannot grow without bound.
 
 A formulation such as
 
@@ -464,78 +379,82 @@ A formulation such as
 \beta_t=\beta s_t
 \]
 
-is not recommended because it gives \(\beta_t=0\) whenever the history is empty, which would disable suppression for the first visual-opposed token.
+is not recommended because it would give
+
+\[
+\beta_t=0
+\]
+
+whenever the history is empty, disabling suppression for the first visually opposed token.
 
 ---
 
-## 9. Worked adaptive-\(\beta_t\) example
+## 8. Worked adaptive-\(\beta_t\) example
 
-For illustration only, suppose
+Suppose for illustration that
 
 \[
 \beta=2,
 \qquad
-\alpha=1.
+\alpha_H=1.
 \]
 
-For B:
+### State A
 
 \[
-s_B\approx0.167,
+N_t=0.3,
+\qquad
+s_t\approx0.231,
 \]
 
 so
 
 \[
-\beta_B
+\beta_t
 =
-2(1+0.167)
-\approx2.334.
+2(1+0.231)
+\approx2.462.
 \]
 
-For A:
+### State B
 
 \[
-s_A\approx0.286,
+N_t=2.0,
+\qquad
+s_t\approx0.667,
 \]
 
 so
 
 \[
-\beta_A
+\beta_t
 =
-2(1+0.286)
-\approx2.572.
+2(1+0.667)
+\approx3.334.
 \]
 
-For C:
+### State C
 
 \[
-s_C\approx0.444,
+N_t=5.0,
+\qquad
+s_t\approx0.833,
 \]
 
 so
 
 \[
-\beta_C
+\beta_t
 =
-2(1+0.444)
-\approx2.888.
+2(1+0.833)
+\approx3.666.
 \]
 
-Thus
-
-\[
-\boxed{
-\beta_B<\beta_A<\beta_C.
-}
-\]
-
-The same current negative visual evidence receives stronger suppression in a trajectory with more persistent historical conflict.
+The same current negative visual evidence is therefore suppressed more strongly after more accumulated historical conflict.
 
 ---
 
-## 10. Adaptive negative-only reconstruction
+## 9. Adaptive negative-only reconstruction
 
 The vocabulary-level negative signal remains
 
@@ -575,7 +494,6 @@ p_t^+(w)\exp[-\beta_t n_t(w)]
 The OPD/JSD training loss remains
 
 \[
-\boxed{
 \ell_t
 =
 \operatorname{JSD}
@@ -583,27 +501,13 @@ The OPD/JSD training loss remains
 q_t,
 p_t^S
 \right).
-}
-\]
-
-The masked response-level objective remains
-
-\[
-L
-=
-\frac{
-\sum_{b,t}
-M_{b,t}\ell_{b,t}
-}{
-\sum_{b,t}M_{b,t}
-}.
 \]
 
 No PPO objective is introduced.
 
 ---
 
-## 11. Pairwise interpretation
+## 10. Pairwise interpretation
 
 For two candidate tokens \(v\) and \(w\),
 
@@ -652,17 +556,11 @@ Then
 0.5\beta_t.
 \]
 
-Using the example strengths:
-
-- sparse-history B: correction \(=0.5\times2.334=1.167\),
-- concentrated-history A: correction \(=0.5\times2.572=1.286\),
-- persistent-history C: correction \(=0.5\times2.888=1.444\).
-
-Thus the current token-level direction is unchanged, but the history modifies how strongly the pairwise odds are shifted.
+Thus history does not change which token is visually opposed; it changes only the magnitude of the pairwise odds correction.
 
 ---
 
-## 12. Why not use a pure position schedule?
+## 11. Why not use a pure position schedule?
 
 A simple alternative would be
 
@@ -679,18 +577,18 @@ This assumes later positions require stronger correction regardless of the actua
 
 Two responses at the same relative position can have very different visual-conflict histories:
 
-- one trajectory may remain visually consistent,
-- another may have accumulated visual-opposed tokens for many steps.
+- one may remain visually consistent,
+- another may have accumulated visually opposed tokens for many steps.
 
 A history-dependent state distinguishes these cases, whereas a position-only schedule does not.
 
-Therefore the proposed state variable is trajectory-adaptive rather than purely position-adaptive.
+Therefore the proposed controller is trajectory-adaptive rather than purely position-adaptive.
 
 ---
 
-## 13. Why positive historical evidence is not included in the main state
+## 12. Why positive historical evidence is not included in the main state
 
-One possible alternative is to compute
+One alternative is
 
 \[
 P_t
@@ -698,7 +596,7 @@ P_t
 \sum_{k<t}[u_k(y_k)]_+
 \]
 
-and then form
+and
 
 \[
 \rho_t
@@ -706,20 +604,18 @@ and then form
 \frac{N_t}{N_t+P_t}.
 \]
 
-This quantity can be useful diagnostically, but it is not recommended as the primary history variable in the first negative-history implementation.
+This can be useful diagnostically, but it is not recommended as the primary controller in the first negative-history implementation.
 
-The reason is conceptual consistency.
-
-The core hypothesis is that negative visual evidence is the more reliable signal. If \(P_t\) enters the denominator of the main suppression-strength controller, positive evidence indirectly weakens the negative-history state even though positive evidence is not trusted for direct target amplification.
+The core hypothesis is that negative visual evidence is the more reliable direction. If \(P_t\) enters the denominator, positive evidence indirectly weakens the negative-history state even though it is not trusted for direct target amplification.
 
 Therefore:
 
-- \(N_t\), \(z_t\), and \(s_t\) use negative evidence only;
-- positive-history statistics may be logged as diagnostics or future ablations.
+- \(N_t\) and \(s_t\) use negative evidence only;
+- positive-history statistics may be logged as diagnostics or ablations.
 
 ---
 
-## 14. Double-counting consideration
+## 13. Double-counting consideration
 
 The teacher distributions
 
@@ -735,15 +631,15 @@ already condition on the entire student prefix
 h_t=(x,y_{<t}).
 \]
 
-Therefore historical information is already present implicitly in the current model state.
+Historical information is therefore already present implicitly in the current model state.
 
-The historical module should not be interpreted as recovering history that the model cannot see.
+The historical module should not be interpreted as recovering history that the teacher cannot see.
 
 Instead it introduces an explicit scalar trajectory statistic:
 
 > How much negative visual evidence has the realized student trajectory accumulated before the current state?
 
-Potential over-counting is controlled in three ways:
+Potential over-counting is controlled because:
 
 1. history does not redefine token membership or direction;
 2. history enters only as a scalar magnitude modifier;
@@ -765,7 +661,7 @@ grow without bound.
 
 ---
 
-## 15. Implementation sketch
+## 14. Implementation sketch
 
 Assume
 
@@ -787,29 +683,22 @@ Compute exclusive cumulative negative path length:
 N = exclusive_cumsum(c)
 ~~~
 
-Compute exclusive valid-response length:
+Compute the bounded history state:
 
 ~~~python
-L = exclusive_cumsum(response_mask)
-~~~
-
-Compute the normalized and bounded history state:
-
-~~~python
-z = N / sqrt(clamp(L, min=1))
-s = z / (1.0 + z)
+s_hist = N / (1.0 + N)
 ~~~
 
 Compute adaptive suppression strength:
 
 ~~~python
-beta_t = beta * (1.0 + alpha * s)
+beta_t = beta * (1.0 + alpha_H * s_hist)
 ~~~
 
 with first-version default
 
 ~~~python
-alpha = 1.0
+alpha_H = 1.0
 ~~~
 
 Compute vocabulary-level negative evidence:
@@ -829,23 +718,25 @@ Then distill with the existing masked JSD objective.
 
 ---
 
-## 16. Required implementation invariants
+## 15. Required implementation invariants
 
 The implementation should enforce:
 
 1. \(N_t\) is exclusive and never includes \(c_t\).
-2. Padding positions do not contribute to \(N_t\) or \(L_t\).
-3. \(L_t\) counts only valid response tokens.
-4. \(s_t\in[0,1)\).
-5. If history is empty, \(s_t=0\) and \(\beta_t=\beta\).
-6. For \(\alpha=1\), \(\beta_t\in[\beta,2\beta)\).
-7. Historical conflict changes suppression magnitude only.
-8. Current token membership still comes only from \(n_t(v)=[-u_t(v)]_+\).
-9. The student loss remains OPD/JSD; no PPO probability ratio is required.
+2. Padding positions do not contribute to \(N_t\).
+3. \(s_t\in[0,1)\).
+4. If history is empty, \(s_t=0\) and \(\beta_t=\beta\).
+5. For \(\alpha_H=1\), \(\beta_t\in[\beta,2\beta)\).
+6. Historical conflict changes suppression magnitude only.
+7. Current token membership still comes only from
+   \[
+   n_t(v)=[-u_t(v)]_+.
+   \]
+8. The student loss remains OPD/JSD; no PPO probability ratio is required.
 
 ---
 
-## 17. Relationship to OPD-Aha
+## 16. Relationship to OPD-Aha
 
 OPD-Aha uses a fixed reconstruction strength
 
@@ -875,11 +766,11 @@ so only negative visual evidence directly alters the target.
 
 where \(\beta_t\) depends on the student's accumulated realized negative visual conflict.
 
-Therefore this section can be integrated as an extension of the existing OPD-Aha scoring and target-reconstruction path without replacing the training framework.
+This section can therefore be integrated as an extension of the existing OPD-Aha scoring and target-reconstruction path without replacing the training framework.
 
 ---
 
-## 18. Main conclusion
+## 17. Main conclusion
 
 The proposed history module is
 
@@ -894,21 +785,9 @@ N_t
 
 \[
 \boxed{
-z_t
-=
-\frac{
-N_t
-}{
-\sqrt{\max(L_t,1)}
-}
-}
-\]
-
-\[
-\boxed{
 s_t
 =
-\frac{z_t}{1+z_t}
+\frac{N_t}{1+N_t}
 }
 \]
 
@@ -916,22 +795,21 @@ s_t
 \boxed{
 \beta_t
 =
-\beta(1+\alpha s_t)
+\beta(1+\alpha_H s_t)
 }
 \]
 
 with the first zero-extra-hyperparameter variant fixing
 
 \[
-\alpha=1.
+\alpha_H=1.
 \]
 
 The interpretation is:
 
 - \(N_t\): cumulative negative path length,
-- \(z_t\): length-controlled historical severity,
 - \(s_t\): bounded history state,
 - \(\beta_t\): state-adaptive suppression strength,
 - future reaction: **not included in this section**.
 
-The next section should study future reaction separately: whether the continuation after position \(t\) keeps accumulating negative visual evidence or begins to reduce it, and how that information can modify pure-OPD reconstruction without introducing PPO.
+The next section treats future information differently from history: history measures accumulated deviation, while future measures the density/persistence of visual conflict in the observed continuation.
