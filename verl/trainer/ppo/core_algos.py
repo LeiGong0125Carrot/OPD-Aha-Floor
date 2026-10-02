@@ -1237,6 +1237,10 @@ def compute_self_distillation_loss(
                 nh_beta_t = counterfactual_extrapolation_beta * (
                     1.0 + counterfactual_hist_alpha * nh_s
                 )
+                if not torch.isfinite(nh_beta_t[loss_mask > 0]).all():
+                    raise FloatingPointError(
+                        "negative-history: non-finite beta_t on a valid position "
+                        "(would silently poison the reconstructed target)")
                 _lens = loss_mask.sum(dim=1)
                 _last = _lens.clamp(min=1).long() - 1
                 _rows = _lens > 0          # rows fully masked by self_distillation_mask excluded
@@ -1256,6 +1260,10 @@ def compute_self_distillation_loss(
                 nh_Fbar = nh_F / nh_K.clamp(min=1.0)
                 nh_r = nh_Fbar / (1.0 + nh_Fbar)
                 nh_weight = (1.0 + counterfactual_future_alpha * nh_r) * loss_mask
+                if not torch.isfinite(nh_weight[loss_mask > 0]).all():
+                    raise FloatingPointError(
+                        "negative-history: non-finite future weight on a valid position "
+                        "(would silently poison the JSD gradient)")
                 _wv = nh_weight[loss_mask > 0]
                 nh_w_mean = _wv.mean().item() if _wv.numel() else 1.0
                 nh_w_p90 = _wv.quantile(0.9).item() if _wv.numel() else 1.0

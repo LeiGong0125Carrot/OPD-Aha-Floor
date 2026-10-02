@@ -239,6 +239,21 @@ try: run(cfg(counterfactual_hist_adaptive_beta=True), null_lp=None)
 except ValueError as e: ok = "teacher_null_log_probs" in str(e)
 check("拦住: 门开但无 null realized lp", ok)
 
+# 有效位上出现非有限值 -> 必须立即报错, 不能静默训练
+tlp_bad = tlp.clone(); tlp_bad[0, 2] = float("nan")
+ok = False
+try:
+    run(cfg(counterfactual_hist_adaptive_beta=True, counterfactual_future_weight=True), null_lp=nlp) if False else \
+    compute_self_distillation_loss(
+        student_log_probs=lp, teacher_log_probs=tlp_bad, response_mask=mask,
+        self_distillation_config=cfg(counterfactual_hist_adaptive_beta=True, counterfactual_future_weight=True),
+        old_log_probs=lp.clone(), student_topk_log_probs=student0, teacher_topk_log_probs=real0,
+        teacher_null_topk_log_probs=null0, teacher_null_log_probs=nlp,
+        self_distillation_mask=torch.ones(B), loss_agg_mode="token-mean")
+except FloatingPointError:
+    ok = True
+check("有效位 NaN -> 立即报错 (不静默训练)", ok)
+
 print("\n" + "=" * 76)
 print("全部通过" if not FAIL else "失败: " + ", ".join(FAIL))
 sys.exit(1 if FAIL else 0)
