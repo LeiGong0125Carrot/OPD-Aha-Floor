@@ -199,6 +199,8 @@ self_distillation:
   counterfactual_future_alpha: 1.0
   # History aggregation for hist_adaptive_beta: "cumsum" (arm C, N_t/(1+N_t), saturates fast) or
   # "mean" (prefix mean conflict Nbar_t, s_t = Nbar_t/(Nbar_t+hist_kappa); kappa ~ measured mean c).
+  # "hf" (history-future residual): s_t = h_t*f_t*eta_t with h=Hbar/(Hbar+k), f=Fbar/(Fbar+k) (strict
+  # suffix mean), eta=0 for length-truncated rollouts (docs/negative_history/aha_history_future_residual_design.md).
   # hist_adaptive_beta may also run without u_clip_pos (full A tilt; beta_t scales only u⁻).
   counterfactual_hist_mode: cumsum
   counterfactual_hist_kappa: 0.10

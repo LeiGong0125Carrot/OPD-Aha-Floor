@@ -127,7 +127,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_hist_shuffle: bool = False
     counterfactual_future_weight: bool = False
     counterfactual_future_alpha: float = 1.0
-    counterfactual_hist_mode: str = "cumsum"
+    counterfactual_hist_mode: str = "cumsum"  # "cumsum" | "mean" | "hf" (history-future residual)
     counterfactual_hist_kappa: float = 0.10
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (

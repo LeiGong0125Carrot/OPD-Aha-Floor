@@ -1177,11 +1177,12 @@ def compute_self_distillation_loss(
     counterfactual_hist_kappa = 0.10 if _kappa_raw is None else float(_kappa_raw)
     _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
     if counterfactual_hist_adaptive_beta:
-        if counterfactual_hist_mode not in ("cumsum", "mean"):
+        if counterfactual_hist_mode not in ("cumsum", "mean", "hf"):
             raise ValueError(
-                f"counterfactual_hist_mode must be 'cumsum' or 'mean', got {counterfactual_hist_mode!r}"
+                "counterfactual_hist_mode must be 'cumsum', 'mean' or 'hf', "
+                f"got {counterfactual_hist_mode!r}"
             )
-        if counterfactual_hist_mode == "mean" and counterfactual_hist_kappa <= 0.0:
+        if counterfactual_hist_mode in ("mean", "hf") and counterfactual_hist_kappa <= 0.0:
             raise ValueError(f"counterfactual_hist_kappa must be > 0, got {counterfactual_hist_kappa}")
     if _nh_any:
         # Runtime guards (the dataclass __post_init__ never runs on this training path --
@@ -1230,6 +1231,7 @@ def compute_self_distillation_loss(
     nh_weight = None          # [B,T] future-persistence JSD weight  (arm D/E)
     nh_c_mean = nh_c_frac_pos = nh_N_last_mean = None
     nh_s_mean = nh_beta_t_mean = nh_w_mean = nh_w_p90 = None
+    nh_h_mean = nh_f_mean = nh_eta_row_frac = nh_s_within_var = nh_s_rowmean_sq = None
     if _nh_any:
         with torch.no_grad():
             # c_t = [-u_t(y_t)]_+  (02 §6); padding never enters (02 §11)
@@ -1262,6 +1264,30 @@ def compute_self_distillation_loss(
                     _n_prev = torch.cumsum(loss_mask, dim=1) - loss_mask
                     nh_Nbar = nh_N / _n_prev.clamp(min=1.0)
                     nh_s = nh_Nbar / (nh_Nbar + counterfactual_hist_kappa)
+                elif counterfactual_hist_mode == "hf":
+                    # History-future residual (aha_history_future_residual_design.md §06):
+                    #   h_t = Hbar/(Hbar+k), f_t = Fbar/(Fbar+k), s_t = h_t f_t eta_t
+                    # so Delta_beta_t = beta*a_H*h_t*f_t*eta_t on the negative half only.
+                    # Hbar: exclusive prefix mean; Fbar: STRICT suffix mean (k>t), 0 if no suffix.
+                    # eta: the rollout ended normally (not length-truncated) -- same convention
+                    # as verl's response_length/clip_ratio (valid length == padded width).
+                    # Truncated rows fall back to the plain A target, but keep their supervision.
+                    _n_prev = torch.cumsum(loss_mask, dim=1) - loss_mask
+                    nh_Hbar = nh_N / _n_prev.clamp(min=1.0)
+                    nh_h = nh_Hbar / (nh_Hbar + counterfactual_hist_kappa)
+                    _rev_h = lambda x: x.flip(1).cumsum(dim=1).flip(1)
+                    _Fs = _rev_h(c_hist) - c_hist
+                    _Kn = _rev_h(loss_mask) - loss_mask
+                    nh_Fbar_hf = _Fs / _Kn.clamp(min=1.0)
+                    nh_f = nh_Fbar_hf / (nh_Fbar_hf + counterfactual_hist_kappa)
+                    _resp_len = response_mask.sum(dim=1)
+                    _eta_row = (_resp_len < response_mask.shape[1]).to(nh_f.dtype)   # [B]
+                    nh_s = nh_h * nh_f * _eta_row.unsqueeze(1)
+                    _den = loss_mask.sum().clamp(min=1.0)
+                    nh_h_mean = (verl_F.masked_sum(nh_h, loss_mask) / _den).item()
+                    nh_f_mean = (verl_F.masked_sum(nh_f, loss_mask) / _den).item()
+                    _has = loss_mask.sum(dim=1) > 0
+                    nh_eta_row_frac = _eta_row[_has].mean().item() if _has.any() else 1.0
                 else:
                     nh_s = nh_N / (1.0 + nh_N)
                 nh_beta_t = counterfactual_extrapolation_beta * (
@@ -1279,6 +1305,17 @@ def compute_self_distillation_loss(
                     if _rows.any() else 0.0
                 )
                 nh_s_mean = (verl_F.masked_sum(nh_s, loss_mask) / loss_mask.sum().clamp(min=1.0)).item()
+                # Is s_t temporal or a per-rollout dose? Micro-batches usually hold ONE rollout,
+                # so report additive pieces and combine after the cross-micro-batch mean:
+                #   within-rollout var  = mean(nh_s_within_var)
+                #   between-rollout var = mean(nh_s_rowmean_sq) - mean(nh_s_mean)^2
+                _cnt = loss_mask.sum(dim=1)
+                _ok = _cnt > 0
+                if _ok.any():
+                    _rm = verl_F.masked_sum(nh_s, loss_mask, axis=1)[_ok] / _cnt[_ok]
+                    _dev = (nh_s[_ok] - _rm.unsqueeze(1)) ** 2
+                    nh_s_within_var = ((_dev * loss_mask[_ok]).sum() / _cnt[_ok].sum()).item()
+                    nh_s_rowmean_sq = (_rm ** 2).mean().item()
                 nh_beta_t_mean = (
                     verl_F.masked_sum(nh_beta_t, loss_mask) / loss_mask.sum().clamp(min=1.0)
                 ).item()
@@ -1587,6 +1624,13 @@ def compute_self_distillation_loss(
         metrics["self_distillation/nh_N_last_mean"] = nh_N_last_mean
         metrics["self_distillation/nh_s_mean"] = nh_s_mean
         metrics["self_distillation/nh_beta_t_mean"] = nh_beta_t_mean
+    if nh_s_within_var is not None:
+        metrics["self_distillation/nh_s_within_var"] = nh_s_within_var
+        metrics["self_distillation/nh_s_rowmean_sq"] = nh_s_rowmean_sq
+    if nh_h_mean is not None:
+        metrics["self_distillation/nh_h_mean"] = nh_h_mean
+        metrics["self_distillation/nh_f_mean"] = nh_f_mean
+        metrics["self_distillation/nh_eta_row_frac"] = nh_eta_row_frac
     if nh_w_mean is not None:
         metrics["self_distillation/nh_w_mean"] = nh_w_mean
         metrics["self_distillation/nh_w_p90"] = nh_w_p90

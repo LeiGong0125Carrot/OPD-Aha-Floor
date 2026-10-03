@@ -313,6 +313,129 @@ check("Ahm 指标上报 beta_t_mean ∈ (β, 2β)",
       BETA < m_ahm["self_distillation/nh_beta_t_mean"] < 2 * BETA,
       f"{m_ahm['self_distillation/nh_beta_t_mean']:.3f}")
 
+# ---- 11. A 底座 + history-future 残余 (Ahf, aha_history_future_residual_design.md) ----
+print("\n[11] A 底座 + history-future 残余 (Ahf)")
+def ref_ahf(log_h, log_f, log_s, tlp, nlp, mask, beta, kappa=0.10, mutant=None):
+    """独立参照 (设计文档 §13.1): Δβ = β h f η, q ∝ p+ exp(β u − Δβ [−u]+)。"""
+    W = mask.shape[1]
+    c = torch.where(mask > 0, torch.relu(-(tlp - nlp)), torch.zeros_like(tlp))
+    Hs = torch.cumsum(c, 1) - c
+    Hn = torch.cumsum(mask, 1) - mask
+    Hbar = Hs / Hn.clamp(min=1)
+    rev = lambda x: x.flip(1).cumsum(1).flip(1)
+    Fs, Fn = rev(c) - c, rev(mask) - mask
+    if mutant == "fut_incl":
+        Fs, Fn = rev(c), rev(mask)                          # 变异: 后缀含当前位
+    Fbar = Fs / Fn.clamp(min=1)
+    h = Hbar / (Hbar + kappa)
+    f = Fbar / (Fbar + (1.0 if mutant == "old_D_scale" else kappa))   # 变异: 旧 D 尺度
+    eta = (mask.sum(1) < W).float().unsqueeze(1)
+    if mutant == "no_eta":
+        eta = torch.ones_like(eta)                          # 变异: 截断不回退
+    dbeta = beta * h * f * eta
+    u = log_h - log_f
+    n = torch.relu(-u)
+    if mutant == "dbeta_both":
+        logits = log_h + beta * u + dbeta.unsqueeze(-1) * u     # 变异: 残余也放大正半边
+    else:
+        logits = log_h + beta * u - dbeta.unsqueeze(-1) * n
+    log_q = torch.log_softmax(logits, -1)
+    q, ps = log_q.exp(), log_s.exp()
+    m = 0.5 * ps + 0.5 * q; logm = (m + 1e-30).log()
+    l = 0.5 * (ps * (log_s - logm)).sum(-1) + 0.5 * (q * (log_q - logm)).sum(-1)
+    return (l * mask).sum() / mask.sum(), h * f * eta, h
+
+def pad1(x, val=0.0):
+    """在时间维末尾补一列 (padding), 使 row0 不再被视为截断。"""
+    shp = list(x.shape); shp[1] = 1
+    return torch.cat([x, torch.full(shp, val, dtype=x.dtype)], 1)
+
+def run_m(c, msk, tl=tlp, nl=nlp, st=student0, rl=real0, nu=null0, lpp=lp):
+    b = msk.shape[0]
+    return compute_self_distillation_loss(
+        student_log_probs=lpp, teacher_log_probs=tl, response_mask=msk,
+        self_distillation_config=c, old_log_probs=lpp.clone(),
+        student_topk_log_probs=st, teacher_topk_log_probs=rl,
+        teacher_null_topk_log_probs=nu, teacher_null_log_probs=nl,
+        self_distillation_mask=torch.ones(b), loss_agg_mode="token-mean")
+
+cAhf = cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+           counterfactual_hist_mode="hf", counterfactual_hist_kappa=0.10)
+cA = cfg(counterfactual_u_clip_pos=False)
+# (a) 原 fixture: row0 填满宽度 -> 视为截断 (η=0); row1 正常结束
+l_hf, m_hf = run(cAhf)
+r_hf, s_hf, h_hf = ref_ahf(log_h, log_f, log_s, tlp, nlp, mask, BETA)
+check("Ahf loss 与独立参照一致 (row0 截断)", abs(l_hf.item() - r_hf.item()) < 1e-5,
+      f"生产 {l_hf.item():.8f} vs 参照 {r_hf.item():.8f}")
+check("截断行 s≡0", bool((s_hf[0] == 0).all()))
+check("η 行比例指标 = 0.5", abs(m_hf["self_distillation/nh_eta_row_frac"] - 0.5) < 1e-9,
+      f"{m_hf['self_distillation/nh_eta_row_frac']}")
+# (b) 补一列 padding: 两行都正常结束
+mk2 = pad1(mask); tl2, nl2, lp2 = pad1(tlp, -1.0), pad1(nlp, -1.0), pad1(lp, -1.0)
+st2, rl2, nu2 = (torch.cat([x, x[:, -1:]], 1) for x in (student0, real0, null0))
+lh2, lf2, ls2 = add_tail(rl2), add_tail(nu2), add_tail(st2)
+l_hf2, m_hf2 = run_m(cAhf, mk2, tl2, nl2, st2, rl2, nu2, lp2)
+r_hf2, s_hf2, h_hf2 = ref_ahf(lh2, lf2, ls2, tl2, nl2, mk2, BETA)
+check("Ahf loss 与独立参照一致 (全部正常结束)", abs(l_hf2.item() - r_hf2.item()) < 1e-5,
+      f"生产 {l_hf2.item():.8f} vs 参照 {r_hf2.item():.8f}")
+for mut, why in (("fut_incl", "后缀含当前位"), ("old_D_scale", "f 用旧 D 尺度 1/(1+F)"),
+                 ("no_eta", "截断不回退"), ("dbeta_both", "残余作用于正半边")):
+    rm, _, _ = ref_ahf(lh2 if mut != "no_eta" else log_h, lf2 if mut != "no_eta" else log_f,
+                       ls2 if mut != "no_eta" else log_s,
+                       tl2 if mut != "no_eta" else tlp, nl2 if mut != "no_eta" else nlp,
+                       mk2 if mut != "no_eta" else mask, BETA, mutant=mut)
+    ref_ok = l_hf2 if mut != "no_eta" else l_hf
+    check(f"抓住变异: {why}", abs(ref_ok.item() - rm.item()) > 1e-7,
+          f"正确 {ref_ok.item():.8f} vs 错版 {rm.item():.8f}")
+check("s=h·f·η ≤ h (HF 剂量不超过 H)", bool((s_hf2 <= h_hf2 + 1e-12).all()))
+_last = (mk2.sum(1).long() - 1)
+check("每行最后有效位 s=0 (无后缀)", bool((s_hf2.gather(1, _last.unsqueeze(1)) == 0).all()))
+check("首位 s=0 (无历史)", bool((s_hf2[:, 0] == 0).all()))
+# (c) 全部截断 -> 精确回退到 A
+mfull = torch.ones(B, T)
+l_tr, _ = run_m(cAhf, mfull)
+l_At, _ = run_m(cA, mfull)
+check("全部截断时 Ahf ≡ A (bit-identical)", torch.equal(l_tr, l_At), f"{l_tr.item():.10f} vs {l_At.item():.10f}")
+# (d) 文档 §7.3 时间统计例 + §7.2 odds 例
+c73 = torch.tensor([[0, .10, .20, .40, .20, .10, 0]]); m73 = torch.ones(1, 7)
+Hb = (torch.cumsum(c73, 1) - c73) / (torch.cumsum(m73, 1) - m73).clamp(min=1)
+rv = lambda x: x.flip(1).cumsum(1).flip(1)
+Fb = (rv(c73) - c73) / (rv(m73) - m73).clamp(min=1)
+h4, f4 = Hb[0, 3] / (Hb[0, 3] + .1), Fb[0, 3] / (Fb[0, 3] + .1)
+check("§7.3: Hbar4=Fbar4=0.10, h=f=0.5, Δβ=1",
+      abs(Hb[0, 3] - .1) < 1e-6 and abs(Fb[0, 3] - .1) < 1e-6 and abs(4 * h4 * f4 - 1) < 1e-6)
+nd = -math.log(0.75)
+odds = lambda db: 4.0 * math.exp(db * nd)
+check("§7.2: odds 4 / 7.111111 / 5.649194 / 4.402570",
+      abs(odds(0) - 4) < 1e-6 and abs(odds(2) - 7.111111) < 1e-5
+      and abs(odds(1.2) - 5.649194) < 1e-5 and abs(odds(1 / 3) - 4.402570) < 1e-5)
+# (e) 指标与守卫
+for k in ("nh_h_mean", "nh_f_mean", "nh_s_within_var", "nh_s_rowmean_sq"):
+    check(f"指标上报 {k}", f"self_distillation/{k}" in m_hf2)
+check("Ahf beta_t_mean ∈ [β, β+β·h_mean]",
+      BETA <= m_hf2["self_distillation/nh_beta_t_mean"] <= BETA * (1 + m_hf2["self_distillation/nh_h_mean"]) + 1e-9)
+ok = False
+try: run(cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+             counterfactual_hist_mode="hf", counterfactual_hist_kappa=0.0))
+except ValueError: ok = True
+check("拦住: hf 模式 κ<=0", ok)
+# (f) within/between 分解: 行内常数 -> within=0
+_, m_cst = run_m(cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+                     counterfactual_hist_mode="cumsum"), torch.tensor([[1., 0, 0, 0, 0, 0], [1., 0, 0, 0, 0, 0]]))
+check("单 token 行: within_var=0", m_cst["self_distillation/nh_s_within_var"] == 0.0)
+# 分解对拍: 逐行 (B=1) 上报再平均, 合成的 within/between 与整批直接计算一致
+_sv = s_hf2; _mk = mk2
+_rm_all = (_sv * _mk).sum(1) / _mk.sum(1)
+_wv_ref = (((_sv - _rm_all.unsqueeze(1)) ** 2) * _mk).sum(1) / _mk.sum(1)
+_parts = [run_m(cAhf, mk2[i:i+1], tl2[i:i+1], nl2[i:i+1], st2[i:i+1], rl2[i:i+1], nu2[i:i+1], lp2[i:i+1])[1]
+          for i in range(B)]
+_w = sum(p["self_distillation/nh_s_within_var"] for p in _parts) / B
+_b = sum(p["self_distillation/nh_s_rowmean_sq"] for p in _parts) / B \
+     - (sum(p["self_distillation/nh_s_mean"] for p in _parts) / B) ** 2
+check("B=1 分片上报可合成 within/between",
+      abs(_w - _wv_ref.mean().item()) < 1e-6 and abs(_b - _rm_all.var(unbiased=False).item()) < 1e-6,
+      f"within {_w:.6f}/{_wv_ref.mean().item():.6f} between {_b:.6f}/{_rm_all.var(unbiased=False).item():.6f}")
+
 print("\n" + "=" * 76)
 print("全部通过" if not FAIL else "失败: " + ", ".join(FAIL))
 sys.exit(1 if FAIL else 0)

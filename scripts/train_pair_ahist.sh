@@ -12,7 +12,7 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HIST_MODE="${HIST_MODE:-mean}"; HIST_KAPPA="${HIST_KAPPA:-0.10}"
-TAG=Ahm; [ "$HIST_MODE" = cumsum ] && TAG=Ahc
+TAG=Ahm; [ "$HIST_MODE" = cumsum ] && TAG=Ahc; [ "$HIST_MODE" = hf ] && TAG=Ahf
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${TAG}${RUN_SUFFIX:-}_6karmA}"
