@@ -219,9 +219,7 @@ check("shuffle 保边际: nh_c_mean 与 C 相同",
 
 # ---- 9. 守卫 ----
 print("\n[9] 运行时守卫")
-for kw, why in ((dict(counterfactual_hist_adaptive_beta=True, counterfactual_u_clip_pos=False),
-                 "hist 无 u_clip_pos"),
-                (dict(counterfactual_future_weight=True, counterfactual_u_clip_pos=False),
+for kw, why in ((dict(counterfactual_future_weight=True, counterfactual_u_clip_pos=False),
                  "fut 无 u_clip_pos"),
                 (dict(counterfactual_hist_adaptive_beta=True, counterfactual_floor_alpha=0.1),
                  "与 floor 互斥"),
@@ -253,6 +251,67 @@ try:
 except FloatingPointError:
     ok = True
 check("有效位 NaN -> 立即报错 (不静默训练)", ok)
+
+# ---- 10. A 底座 + 均值历史 (Ahm) ----
+print("\n[10] A 底座 + 均值历史 (Ahm)")
+def ref_ahm(log_h, log_f, log_s, tlp, nlp, mask, beta, kappa=0.10, mode="mean", clip=False,
+            mutant=None):
+    """独立参照: q ∝ p+ exp(β u⁺ + β_t u⁻); β_t = β(1+s), s 由前缀均值冲突 / κ 映射。"""
+    c = torch.where(mask > 0, torch.relu(-(tlp - nlp)), torch.zeros_like(tlp))
+    N = torch.cumsum(c, 1) - c
+    if mode == "mean":
+        n_prev = torch.cumsum(mask, 1) - mask
+        if mutant == "incl_count":
+            n_prev = torch.cumsum(mask, 1)                 # 变异: 计数含当前位
+        Nb = N / n_prev.clamp(min=1)
+        s = Nb / (Nb + kappa)
+    else:
+        s = N / (1 + N)
+    bt = beta * (1 + s)
+    u = log_h - log_f
+    if clip: u = torch.clamp(u, max=0.0)
+    if mutant == "bt_on_both":
+        tilt = bt.unsqueeze(-1) * u                        # 变异: β_t 也放大正半边
+    else:
+        tilt = beta * torch.clamp(u, min=0.0) + bt.unsqueeze(-1) * torch.clamp(u, max=0.0)
+    log_q = torch.log_softmax(log_h + tilt, -1)
+    q, ps = log_q.exp(), log_s.exp()
+    m = 0.5 * ps + 0.5 * q; logm = (m + 1e-30).log()
+    l = 0.5 * (ps * (log_s - logm)).sum(-1) + 0.5 * (q * (log_q - logm)).sum(-1)
+    return (l * mask).sum() / mask.sum(), s
+cAhm = cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+           counterfactual_hist_mode="mean", counterfactual_hist_kappa=0.10)
+l_ahm, m_ahm = run(cAhm)
+r_ahm, s_ref = ref_ahm(log_h, log_f, log_s, tlp, nlp, mask, BETA)
+check("Ahm loss 与独立参照一致 (<1e-5)", abs(l_ahm.item() - r_ahm.item()) < 1e-5,
+      f"生产 {l_ahm.item():.8f} vs 参照 {r_ahm.item():.8f}")
+for mut, why in (("incl_count", "计数含当前位"), ("bt_on_both", "β_t 误作用于正半边")):
+    rm, _ = ref_ahm(log_h, log_f, log_s, tlp, nlp, mask, BETA, mutant=mut)
+    check(f"抓住变异: {why}", abs(l_ahm.item() - rm.item()) > 1e-7,
+          f"正确 {l_ahm.item():.8f} vs 错版 {rm.item():.8f}")
+l_A, _ = run(cfg(counterfactual_u_clip_pos=False))
+check("Ahm 与纯 A 不同 (β_t 生效)", abs(l_ahm.item() - l_A.item()) > 1e-7)
+check("s 首位为 0 且 ∈[0,1)", bool((s_ref[:, 0] == 0).all() and (s_ref >= 0).all() and (s_ref < 1).all()))
+cc = torch.full((1, 200), 0.10); mm = torch.ones(1, 200)
+Ncs = torch.cumsum(cc, 1) - cc
+s_cum = Ncs / (1 + Ncs)
+Nb = Ncs / (torch.cumsum(mm, 1) - mm).clamp(min=1); s_mean = Nb / (Nb + 0.10)
+check("cumsum 版在 200 token 处饱和 (s>0.95)", s_cum[0, -1].item() > 0.95, f"{s_cum[0,-1]:.3f}")
+check("mean 版不饱和 (恒定 c=κ 时 s=0.5)", abs(s_mean[0, -1].item() - 0.5) < 1e-6, f"{s_mean[0,-1]:.3f}")
+l_C2, _ = run(cfg(counterfactual_hist_adaptive_beta=True))
+r_C2 = ref_loss(log_h, log_f, log_s, tlp, nlp, mask, BETA, hist=True)
+check("sup 底座 + cumsum 仍与 arm C 参照一致", abs(l_C2.item() - r_C2.item()) < 1e-6)
+for kw, why in ((dict(counterfactual_u_clip_pos=False, counterfactual_future_weight=True), "fut 无 u_clip 仍被拦"),
+                (dict(counterfactual_hist_adaptive_beta=True, counterfactual_hist_mode="foo"), "非法 hist_mode"),
+                (dict(counterfactual_hist_adaptive_beta=True, counterfactual_hist_mode="mean",
+                      counterfactual_hist_kappa=0.0), "κ<=0")):
+    ok = False
+    try: run(cfg(**kw))
+    except ValueError: ok = True
+    check(f"拦住: {why}", ok)
+check("Ahm 指标上报 beta_t_mean ∈ (β, 2β)",
+      BETA < m_ahm["self_distillation/nh_beta_t_mean"] < 2 * BETA,
+      f"{m_ahm['self_distillation/nh_beta_t_mean']:.3f}")
 
 print("\n" + "=" * 76)
 print("全部通过" if not FAIL else "失败: " + ", ".join(FAIL))

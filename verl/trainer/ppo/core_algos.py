@@ -1162,15 +1162,39 @@ def compute_self_distillation_loss(
     counterfactual_future_alpha = float(
         getattr(self_distillation_config, "counterfactual_future_alpha", 1.0) or 1.0
     )
+    # History aggregation (arm C uses "cumsum", 04 §4). "mean" replaces the cumulative N_t by the
+    # prefix MEAN conflict Nbar_t = N_t / (#valid tokens before t) and maps it with a reference
+    # kappa: s_t = Nbar_t / (Nbar_t + kappa). Motivation (docs/negative_history/nhC_r1_casestudy.md):
+    # the cumulative N_t saturates within a few dozen tokens (c_t ~ 0.10/token), so beta_t became
+    # an almost-constant ~6.3 -- arm C measured a DOSE change, not temporal adaptation. The mean
+    # stays O(c) and moves with the trajectory; kappa ~= the measured average c (0.103) puts an
+    # average prefix at s=0.5 (beta_t ~= 6), i.e. dose-matched to arm C, so any difference from C
+    # is attributable to the temporal variation itself.
+    counterfactual_hist_mode = str(
+        getattr(self_distillation_config, "counterfactual_hist_mode", "cumsum") or "cumsum"
+    )
+    _kappa_raw = getattr(self_distillation_config, "counterfactual_hist_kappa", None)
+    counterfactual_hist_kappa = 0.10 if _kappa_raw is None else float(_kappa_raw)
     _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
+    if counterfactual_hist_adaptive_beta:
+        if counterfactual_hist_mode not in ("cumsum", "mean"):
+            raise ValueError(
+                f"counterfactual_hist_mode must be 'cumsum' or 'mean', got {counterfactual_hist_mode!r}"
+            )
+        if counterfactual_hist_mode == "mean" and counterfactual_hist_kappa <= 0.0:
+            raise ValueError(f"counterfactual_hist_kappa must be > 0, got {counterfactual_hist_kappa}")
     if _nh_any:
         # Runtime guards (the dataclass __post_init__ never runs on this training path --
         # main_ppo forces the legacy worker impl, so the config stays a plain DictConfig).
-        if not counterfactual_u_clip_pos:
+        # hist_adaptive_beta may run on the full A tilt: beta_t then modulates ONLY the negative
+        # half, q ∝ p+ · exp(beta·u⁺ + beta_t·u⁻) (positive half keeps the base beta). On the
+        # suppression-only base (u_clip_pos) u⁺ ≡ 0, so this reduces bit-identically to arm C.
+        # future_weight was only designed/validated on the negative-only base: keep that guard.
+        if counterfactual_future_weight and not counterfactual_u_clip_pos:
             raise ValueError(
-                "negative-history gates (hist_adaptive_beta / future_weight) require "
-                "counterfactual_u_clip_pos=True: the design builds on the negative-only tilt "
-                "q ∝ p+ · exp(beta_t · min(u, 0)) (docs/negative_history/03)."
+                "counterfactual_future_weight requires counterfactual_u_clip_pos=True: the design "
+                "builds on the negative-only tilt q ∝ p+ · exp(beta · min(u, 0)) "
+                "(docs/negative_history/03)."
             )
         if teacher_null_log_probs is None:
             raise ValueError(
@@ -1233,7 +1257,13 @@ def compute_self_distillation_loss(
                             c_hist[_b, _idx] = nh_c[_b, _perm]
                 # N_t = sum_{k<t} c_k (EXCLUSIVE, 04 §4); s = N/(1+N); beta_t = beta(1+a_H s)
                 nh_N = torch.cumsum(c_hist, dim=1) - c_hist
-                nh_s = nh_N / (1.0 + nh_N)
+                if counterfactual_hist_mode == "mean":
+                    # exclusive count of valid prefix tokens; t with an empty prefix -> s = 0
+                    _n_prev = torch.cumsum(loss_mask, dim=1) - loss_mask
+                    nh_Nbar = nh_N / _n_prev.clamp(min=1.0)
+                    nh_s = nh_Nbar / (nh_Nbar + counterfactual_hist_kappa)
+                else:
+                    nh_s = nh_N / (1.0 + nh_N)
                 nh_beta_t = counterfactual_extrapolation_beta * (
                     1.0 + counterfactual_hist_alpha * nh_s
                 )
@@ -1401,12 +1431,18 @@ def compute_self_distillation_loss(
                     with torch.no_grad():
                         sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
                     u_term = torch.clamp(u_term, max=0.0)
-                _beta_eff = (
-                    nh_beta_t.unsqueeze(-1) if nh_beta_t is not None
-                    else counterfactual_extrapolation_beta
-                )
+                if nh_beta_t is not None:
+                    # beta_t acts on the negative half only; the positive half keeps base beta.
+                    # With u_clip_pos (arm C) clamp(u,min=0) == 0 and clamp(u,max=0) == u, so this is
+                    # bit-identical to the previous beta_t * u_term.
+                    _tilt = (
+                        counterfactual_extrapolation_beta * torch.clamp(u_term, min=0.0)
+                        + nh_beta_t.unsqueeze(-1) * torch.clamp(u_term, max=0.0)
+                    )
+                else:
+                    _tilt = counterfactual_extrapolation_beta * u_term
                 teacher_distill_log_probs = F.log_softmax(
-                    teacher_real_distill_log_probs + _beta_eff * u_term,
+                    teacher_real_distill_log_probs + _tilt,
                     dim=-1,
                 )
             if counterfactual_target_gamma != 1.0 and counterfactual_st_enable:

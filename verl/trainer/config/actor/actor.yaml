@@ -197,6 +197,11 @@ self_distillation:
   counterfactual_hist_shuffle: false
   counterfactual_future_weight: false
   counterfactual_future_alpha: 1.0
+  # History aggregation for hist_adaptive_beta: "cumsum" (arm C, N_t/(1+N_t), saturates fast) or
+  # "mean" (prefix mean conflict Nbar_t, s_t = Nbar_t/(Nbar_t+hist_kappa); kappa ~ measured mean c).
+  # hist_adaptive_beta may also run without u_clip_pos (full A tilt; beta_t scales only u⁻).
+  counterfactual_hist_mode: cumsum
+  counterfactual_hist_kappa: 0.10
 
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null

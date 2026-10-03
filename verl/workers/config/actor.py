@@ -127,6 +127,8 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_hist_shuffle: bool = False
     counterfactual_future_weight: bool = False
     counterfactual_future_alpha: float = 1.0
+    counterfactual_hist_mode: str = "cumsum"
+    counterfactual_hist_kappa: float = 0.10
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -214,9 +216,9 @@ class SelfDistillationConfig(BaseConfig):
             if not 0.0 < self.counterfactual_st_eps <= 1.0:
                 raise ValueError(f"counterfactual_st_eps must be in (0,1], got {self.counterfactual_st_eps}")
         if self.counterfactual_hist_adaptive_beta or self.counterfactual_future_weight:
-            if not self.counterfactual_u_clip_pos:
+            if self.counterfactual_future_weight and not self.counterfactual_u_clip_pos:
                 raise ValueError(
-                    "negative-history gates require counterfactual_u_clip_pos=True "
+                    "counterfactual_future_weight requires counterfactual_u_clip_pos=True "
                     "(the design builds on the negative-only tilt)"
                 )
             if self.counterfactual_st_enable or self.counterfactual_floor_alpha \
