@@ -129,6 +129,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_future_alpha: float = 1.0
     counterfactual_hist_mode: str = "cumsum"  # "cumsum" | "mean" | "hf" (history-future residual)
     counterfactual_hist_kappa: float = 0.10
+    counterfactual_hist_half: str = "neg"  # "neg" (suppression, C/Ahm/Ahf) | "pos" (X1 re-grounding)
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"

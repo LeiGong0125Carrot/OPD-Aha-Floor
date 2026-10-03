@@ -436,6 +436,68 @@ check("B=1 分片上报可合成 within/between",
       abs(_w - _wv_ref.mean().item()) < 1e-6 and abs(_b - _rm_all.var(unbiased=False).item()) < 1e-6,
       f"within {_w:.6f}/{_wv_ref.mean().item():.6f} between {_b:.6f}/{_rm_all.var(unbiased=False).item():.6f}")
 
+# ---- 12. X1: 历史触发的重新锚定 (β_t 作用于正半边) ----
+print("\n[12] X1 历史触发重新锚定 (hist_half=pos)")
+def ref_x1(log_h, log_f, log_s, tlp, nlp, mask, beta, kappa=0.10, mutant=None):
+    """独立参照: q ∝ p+ exp(β_t u⁺ + β u⁻), β_t = β(1+s), s = 前缀均值冲突/(+κ)。"""
+    c = torch.where(mask > 0, torch.relu(-(tlp - nlp)), torch.zeros_like(tlp))
+    N = torch.cumsum(c, 1) - c
+    Nb = N / (torch.cumsum(mask, 1) - mask).clamp(min=1)
+    s = Nb / (Nb + kappa)
+    bt = (beta * (1 + s)).unsqueeze(-1)
+    u = log_h - log_f
+    if mutant == "neg_half":
+        tilt = beta * u.clamp(min=0) + bt * u.clamp(max=0)       # 变异: 仍作用负半边 (=Ahm)
+    elif mutant == "both":
+        tilt = bt * u                                            # 变异: 两半都放大
+    else:
+        tilt = bt * u.clamp(min=0) + beta * u.clamp(max=0)
+    log_q = torch.log_softmax(log_h + tilt, -1)
+    q, ps = log_q.exp(), log_s.exp()
+    m = 0.5 * ps + 0.5 * q; logm = (m + 1e-30).log()
+    l = 0.5 * (ps * (log_s - logm)).sum(-1) + 0.5 * (q * (log_q - logm)).sum(-1)
+    return (l * mask).sum() / mask.sum(), log_q
+cX1 = cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+          counterfactual_hist_mode="mean", counterfactual_hist_kappa=0.10,
+          counterfactual_hist_half="pos")
+l_x1, m_x1 = run(cX1)
+r_x1, lq_x1 = ref_x1(log_h, log_f, log_s, tlp, nlp, mask, BETA)
+check("X1 loss 与独立参照一致 (<1e-5)", abs(l_x1.item() - r_x1.item()) < 1e-5,
+      f"生产 {l_x1.item():.8f} vs 参照 {r_x1.item():.8f}")
+for mut, why in (("neg_half", "β_t 仍作用于负半边"), ("both", "β_t 两半都放大")):
+    rm, _ = ref_x1(log_h, log_f, log_s, tlp, nlp, mask, BETA, mutant=mut)
+    check(f"抓住变异: {why}", abs(l_x1.item() - rm.item()) > 1e-7,
+          f"正确 {l_x1.item():.8f} vs 错版 {rm.item():.8f}")
+l_ahm_neg, _ = run(cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+                       counterfactual_hist_mode="mean", counterfactual_hist_kappa=0.10,
+                       counterfactual_hist_half="neg"))
+check("显式 half=neg 与缺省 (Ahm) bit-identical", torch.equal(l_ahm_neg, l_ahm))
+# 负半边内部相对比例与 A 相同 (只改正半边)
+_u = log_h - log_f
+_lqA = torch.log_softmax(log_h + BETA * _u, -1)
+_neg = _u <= 0
+_ok = True
+for b in range(B):
+    for tt in range(T):
+        if mask[b, tt] == 0: continue
+        idx = _neg[b, tt].nonzero(as_tuple=True)[0]
+        if idx.numel() < 2: continue
+        dA = _lqA[b, tt, idx] - _lqA[b, tt, idx[0]]
+        dX = lq_x1[b, tt, idx] - lq_x1[b, tt, idx[0]]
+        _ok &= torch.allclose(dA, dX, atol=1e-5)
+check("X1 不改变 u≤0 集合内部的相对 odds", bool(_ok))
+ok = False
+try: run(cfg(counterfactual_u_clip_pos=True, counterfactual_hist_adaptive_beta=True,
+             counterfactual_hist_half="pos"))
+except ValueError: ok = True
+check("拦住: half=pos + u_clip_pos (静默空操作)", ok)
+ok = False
+try: run(cfg(counterfactual_u_clip_pos=False, counterfactual_hist_adaptive_beta=True,
+             counterfactual_hist_half="foo"))
+except ValueError: ok = True
+check("拦住: 非法 hist_half", ok)
+check("X1 beta_t_mean ∈ (β, 2β)", BETA < m_x1["self_distillation/nh_beta_t_mean"] < 2 * BETA)
+
 print("\n" + "=" * 76)
 print("全部通过" if not FAIL else "失败: " + ", ".join(FAIL))
 sys.exit(1 if FAIL else 0)

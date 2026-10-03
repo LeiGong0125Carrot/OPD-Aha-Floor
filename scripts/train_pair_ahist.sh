@@ -12,7 +12,9 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HIST_MODE="${HIST_MODE:-mean}"; HIST_KAPPA="${HIST_KAPPA:-0.10}"
+HIST_HALF="${HIST_HALF:-neg}"
 TAG=Ahm; [ "$HIST_MODE" = cumsum ] && TAG=Ahc; [ "$HIST_MODE" = hf ] && TAG=Ahf
+[ "$HIST_HALF" = pos ] && TAG="X1${TAG#Ah}"     # X1m / X1f / X1c: history-triggered re-grounding
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${TAG}${RUN_SUFFIX:-}_6karmA}"
@@ -27,13 +29,14 @@ export TRAINER_SAVE_FREQ="${TRAINER_SAVE_FREQ:-5}" TRAINER_TOTAL_EPOCHS="${TRAIN
 export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export ACTOR_USE_DYNAMIC_BSZ=False
 
-echo "${EXPERIMENT_NAME_OVERRIDE}: A + history-adaptive u⁻ (mode=${HIST_MODE}, κ=${HIST_KAPPA}) β=${COUNTERFACTUAL_EXTRAPOLATION_BETA} (seed42, pair)"
+echo "${EXPERIMENT_NAME_OVERRIDE}: A + history-adaptive u⁻ (mode=${HIST_MODE}, κ=${HIST_KAPPA}, half=${HIST_HALF}) β=${COUNTERFACTUAL_EXTRAPOLATION_BETA} (seed42, pair)"
 echo "  并行配置: n_gpus=${TRAINER_N_GPUS_PER_NODE} ulysses_sp=${ULYSSES_SP:-1} rollout_n=${ROLLOUT_N} lr=${LR}  <- 复现跑必须逐项相同"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.counterfactual_null_scope=last \
     actor_rollout_ref.actor.self_distillation.counterfactual_hist_adaptive_beta=True \
     actor_rollout_ref.actor.self_distillation.counterfactual_hist_mode="${HIST_MODE}" \
     actor_rollout_ref.actor.self_distillation.counterfactual_hist_kappa="${HIST_KAPPA}" \
+    actor_rollout_ref.actor.self_distillation.counterfactual_hist_half="${HIST_HALF}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \

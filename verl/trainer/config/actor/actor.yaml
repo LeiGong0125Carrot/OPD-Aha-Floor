@@ -204,6 +204,9 @@ self_distillation:
   # hist_adaptive_beta may also run without u_clip_pos (full A tilt; beta_t scales only u⁻).
   counterfactual_hist_mode: cumsum
   counterfactual_hist_kappa: 0.10
+  # Which half beta_t modulates: "neg" (suppression; C/Ahm/Ahf) or "pos" (X1 re-grounding: history
+  # conflict raises the promotion of visually supported tokens; requires u_clip_pos=False).
+  counterfactual_hist_half: neg
 
   # Teacher prompt mode: null for SDPO (image swap), "answer_hint" for OPSD (text hint)
   teacher_prompt_mode: null

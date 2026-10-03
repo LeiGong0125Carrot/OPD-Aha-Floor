@@ -1175,7 +1175,24 @@ def compute_self_distillation_loss(
     )
     _kappa_raw = getattr(self_distillation_config, "counterfactual_hist_kappa", None)
     counterfactual_hist_kappa = 0.10 if _kappa_raw is None else float(_kappa_raw)
+    # Which half of the visual contrast the trajectory state modulates (X1, 10-03):
+    #   "neg": suppression of visually opposed tokens (arms C / Ahm / Ahf),
+    #   "pos": re-grounding -- the history state raises the PROMOTION of visually supported
+    #          tokens, q ∝ p+ · exp(beta_t·u⁺ + beta·u⁻); the negative half keeps base beta.
+    counterfactual_hist_half = str(
+        getattr(self_distillation_config, "counterfactual_hist_half", "neg") or "neg"
+    )
     _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
+    if counterfactual_hist_adaptive_beta:
+        if counterfactual_hist_half not in ("neg", "pos"):
+            raise ValueError(
+                f"counterfactual_hist_half must be 'neg' or 'pos', got {counterfactual_hist_half!r}"
+            )
+        if counterfactual_hist_half == "pos" and counterfactual_u_clip_pos:
+            raise ValueError(
+                "counterfactual_hist_half='pos' modulates u⁺, which u_clip_pos removes -- "
+                "the combination would be a silent no-op."
+            )
     if counterfactual_hist_adaptive_beta:
         if counterfactual_hist_mode not in ("cumsum", "mean", "hf"):
             raise ValueError(
@@ -1468,7 +1485,13 @@ def compute_self_distillation_loss(
                     with torch.no_grad():
                         sup_frac_u_pos_per_token = (u_term > 0).float().mean(dim=-1)
                     u_term = torch.clamp(u_term, max=0.0)
-                if nh_beta_t is not None:
+                if nh_beta_t is not None and counterfactual_hist_half == "pos":
+                    # X1 re-grounding: beta_t acts on the POSITIVE half only.
+                    _tilt = (
+                        nh_beta_t.unsqueeze(-1) * torch.clamp(u_term, min=0.0)
+                        + counterfactual_extrapolation_beta * torch.clamp(u_term, max=0.0)
+                    )
+                elif nh_beta_t is not None:
                     # beta_t acts on the negative half only; the positive half keeps base beta.
                     # With u_clip_pos (arm C) clamp(u,min=0) == 0 and clamp(u,max=0) == u, so this is
                     # bit-identical to the previous beta_t * u_term.
