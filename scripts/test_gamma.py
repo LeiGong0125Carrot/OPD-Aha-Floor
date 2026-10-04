@@ -172,12 +172,12 @@ check("能区分'γ 误加在 p⁺ 上'的实现", abs(l50v - wrong) > 1e-3,
 print("\n[6] 新增指标")
 _, m50 = run(cfg(counterfactual_target_gamma=50.0))
 _, m05 = run(cfg(counterfactual_target_gamma=0.5))
-for k in ("target_max_prob", "target_entropy"):
+for k in ("target_top1_prob", "target_entropy"):
     check(f"{k} 在 γ=1 也上报 (可横向对照)", f"self_distillation/{k}" in m_base)
 q_ref = ref_target(log_h, log_f, BETA, gamma=50.0).exp()
-check("target_max_prob 与手算一致",
-      abs(m50["self_distillation/target_max_prob"] - float(q_ref.amax(-1).mean())) < 1e-5,
-      f"{m50['self_distillation/target_max_prob']:.6f}")
+check("target_top1_prob 与手算一致",
+      abs(m50["self_distillation/target_top1_prob"] - float(q_ref.amax(-1).mean())) < 1e-5,
+      f"{m50['self_distillation/target_top1_prob']:.6f}")
 lq = ref_target(log_h, log_f, BETA, gamma=50.0)
 check("target_entropy 与手算一致",
       abs(m50["self_distillation/target_entropy"] - float((-(lq.exp()*lq).sum(-1)).mean())) < 1e-5)

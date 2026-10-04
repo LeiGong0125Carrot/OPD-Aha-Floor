@@ -142,8 +142,8 @@ _, m41 = run(cS_notail, student=s41, real=t41, null=None, null_lp=None, msk=m1, 
 q41 = (pT * (pT / pS) ** BETA); q41 = q41 / q41.sum()
 check("§4.1: q_S = [0.987781350, 0.001929260, 0.010289389]",
       torch.allclose(q41, torch.tensor([0.987781350, 0.001929260, 0.010289389]), atol=1e-8), f"{q41.tolist()}")
-check("§4.1: 生产 target_max_prob = 0.987781350", abs(m41["self_distillation/target_max_prob"] - 0.987781350) < 1e-6,
-      f"{m41['self_distillation/target_max_prob']:.9f}")
+check("§4.1: 生产 target_top1_prob = 0.987781350", abs(m41["self_distillation/target_top1_prob"] - 0.987781350) < 1e-6,
+      f"{m41['self_distillation/target_top1_prob']:.9f}")
 # §5 ranking reversal
 pS5 = torch.tensor([.75, .20, .05]); pT5 = torch.tensor([.60, .30, .10])
 _, m5 = run(cS_notail, student=pS5.log().view(1, 1, 3), real=pT5.log().view(1, 1, 3), null=None, null_lp=None,
@@ -151,7 +151,7 @@ _, m5 = run(cS_notail, student=pS5.log().view(1, 1, 3), real=pT5.log().view(1, 1
 q5 = pT5 * (pT5 / pS5) ** BETA; q5 = q5 / q5.sum()
 check("§5: 排序反转 q_S ≈ [0.073044812, 0.451403027, 0.475552161], argmax=plain",
       torch.allclose(q5, torch.tensor([0.073044812, 0.451403027, 0.475552161]), atol=1e-8) and q5.argmax().item() == 2)
-check("§5: 生产 target_max_prob = 0.475552161", abs(m5["self_distillation/target_max_prob"] - 0.475552161) < 1e-6)
+check("§5: 生产 target_top1_prob = 0.475552161", abs(m5["self_distillation/target_top1_prob"] - 0.475552161) < 1e-6)
 # §6.2 tail example: explicit top-3 + tail
 cS_k3 = cfg(counterfactual_reference="student", distillation_topk=3, distillation_add_tail=True)
 s62 = torch.tensor([.40, .30, .20]).log().view(1, 1, 3); t62 = torch.tensor([.20, .40, .20]).log().view(1, 1, 3)
@@ -161,7 +161,7 @@ check("§6.2: 合并后 target = [.002672826, .270318429, .042765220, .684243524
       torch.allclose(q62, torch.tensor([.002672826, .270318429, .042765220, .684243524]), atol=1e-8))
 check("§6.2: 生产 target_tail_mass = 0.684243524 且 argmax 为 tail",
       abs(m62["self_distillation/target_tail_mass"] - 0.684243524) < 1e-6
-      and m62["self_distillation/target_argmax_tail_frac"] == 1.0, f"{m62['self_distillation/target_tail_mass']:.9f}")
+      and m62["self_distillation/target_tail_top1_frac"] == 1.0, f"{m62['self_distillation/target_tail_mass']:.9f}")
 check("§6.2: 生产 teacher_tail_mass = 0.20", abs(m62["self_distillation/teacher_tail_mass"] - 0.20) < 1e-6)
 # aggregation order is NOT interchangeable
 tail_s = torch.tensor([.05, .03, .02]); tail_t = torch.tensor([.15, .03, .02])
@@ -239,6 +239,44 @@ check("诊断指标范围: u_abs_mean>0, teacher_student_kl≥0, teacher_tail_ma
       mS["self_distillation/counterfactual_u_abs_mean"] > 0 and mS["self_distillation/teacher_student_kl"] >= -1e-7
       and 0 < mS["self_distillation/teacher_tail_mass"] < 1 and mS["self_distillation/counterfactual_u_p90"] > 0)
 
+# ---- 10. 指标管道: 名称分派 + 计数聚合 (candidate_s_results §7.2/§7.6) ----
+print("\n[10] 指标管道 append_to_dict -> reduce_metrics")
+from verl.utils.py_functional import append_to_dict
+from verl.utils.metric import reduce_metrics, Metric
+import re as _re
+_, mA2 = run(cfg()); _, mS2 = runS()
+bad = [k for k in list(mA2) + list(mS2) if _re.search(r"max|min", k.split("/")[-1])]
+check("loss 函数输出的普通指标名不含 max/min 子串", not bad, f"{bad}")
+check("worst-mb 指标是显式 MAX 的 Metric 对象", isinstance(mS2["self_distillation/target_top1_prob_worst_mb"], Metric))
+# §7.2 合成例: 四个等长 micro-batch, tail-top1 比例 [0,0,0.02,0.08] -> 全局 2.5%, 最坏 8%
+agg = {}
+for frac in (0.0, 0.0, 0.02, 0.08):
+    append_to_dict(agg, {"self_distillation/target_tail_top1_sum": frac * 100, "self_distillation/target_stat_count": 100.0,
+                         "self_distillation/target_argmax_tail_frac_OLD": frac,
+                         "self_distillation/worst_mb": Metric(aggregation="max", value=frac)})
+red = reduce_metrics(agg)
+g = red["self_distillation/target_tail_top1_sum"] / red["self_distillation/target_stat_count"]
+check("计数聚合: mean(sum)/mean(count) = 2.5%", abs(g - 0.025) < 1e-12, f"{g:.4f}")
+check("旧命名 (含 argmax) 会被 reducer 取 max = 8% (复现问题)", abs(red["self_distillation/target_argmax_tail_frac_OLD"] - 0.08) < 1e-12)
+check("显式 MAX Metric 给出最坏 micro-batch 8%", abs(red["self_distillation/worst_mb"] - 0.08) < 1e-12)
+# 不等长 micro-batch: token 加权 vs 等权
+agg = {}
+for frac, n in ((0.10, 10), (0.0, 190)):
+    append_to_dict(agg, {"self_distillation/target_tail_top1_sum": frac * n, "self_distillation/target_stat_count": float(n),
+                         "self_distillation/target_tail_top1_frac": frac})
+red = reduce_metrics(agg)
+g = red["self_distillation/target_tail_top1_sum"] / red["self_distillation/target_stat_count"]
+check("不等长 micro-batch: 计数聚合 = token 加权 0.5%, 等权均值 = 5% (两者区分开)",
+      abs(g - 0.005) < 1e-12 and abs(red["self_distillation/target_tail_top1_frac"] - 0.05) < 1e-12)
+# 生产 loss 的 sum/count 与逐位置手算一致 (S 配置, 变长 mask)
+_, mS3 = runS(msk=m2)
+_lt2, _ls2 = add_tail(real0), add_tail(student0)
+_lq2 = torch.log_softmax(_lt2 + BETA * (_lt2 - _ls2.detach()), -1); _q2 = _lq2.exp()
+_top1 = (_q2.amax(-1) * m2).sum().item(); _tail = ((_q2.argmax(-1) == K).float() * m2).sum().item()
+check("生产 target_top1_prob_sum / target_tail_top1_sum / count 与手算一致",
+      abs(mS3["self_distillation/target_top1_prob_sum"] - _top1) < 1e-5 and abs(mS3["self_distillation/target_tail_top1_sum"] - _tail) < 1e-9
+      and mS3["self_distillation/target_stat_count"] == m2.sum().item())
+
 # ---- 9. 与改动前代码 (sup@bea75c6) 逐比特回归: null 路径 loss 与梯度必须完全不变 ----
 print("\n[9] 与 bea75c6 的 core_algos 逐比特回归 (reference=null 路径)")
 import subprocess, importlib.util, tempfile
@@ -268,9 +306,10 @@ try:
                        teacher_null_log_probs=nlp, self_distillation_mask=torch.ones(B), loss_agg_mode=agg)
             l1, m1 = OLD(student_topk_log_probs=s1, **kws); l1.backward()
             l2, m2 = compute_self_distillation_loss(student_topk_log_probs=s2, **kws); l2.backward()
-            ok = torch.equal(l1, l2) and torch.equal(s1.grad, s2.grad) and all(m1[k] == m2[k] for k in set(m1) & set(m2))
+            _bad = [k for k in set(m1) & set(m2) if m1[k] != m2[k]]
+            ok = torch.equal(l1, l2) and torch.equal(s1.grad, s2.grad) and not _bad
             all_ok &= ok
-            if not ok: print(f"    mismatch: {name} / {agg}")
+            if not ok: print(f"    mismatch: {name} / {agg} loss_eq={torch.equal(l1, l2)} grad_eq={torch.equal(s1.grad, s2.grad)} keys={_bad}")
     check("12 配置 × 2 聚合: loss / 学生梯度 / 既有指标 与 bea75c6 bit-identical", all_ok)
     os.unlink(_tmp.name)
 except Exception as _e:   # noqa: BLE001

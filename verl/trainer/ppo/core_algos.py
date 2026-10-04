@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from omegaconf import DictConfig
 
 import verl.utils.torch_functional as verl_F
+from verl.utils.metric import AggregationType, Metric
 from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
 from verl.utils.import_utils import deprecated
@@ -1720,8 +1721,6 @@ def compute_self_distillation_loss(
         ("counterfactual_u_frac_pos", cf_u_frac_pos_per_token),
         ("teacher_student_kl", teacher_student_kl_per_token),
         ("teacher_tail_mass", teacher_tail_mass_per_token),
-        ("target_tail_mass", target_tail_mass_per_token),
-        ("target_argmax_tail_frac", target_argmax_tail_frac_per_token),
     ):
         if _t is not None:
             metrics[f"self_distillation/{_k}"] = (
@@ -1754,14 +1753,38 @@ def compute_self_distillation_loss(
         metrics["self_distillation/tanh_compressed_frac"] = (
             verl_F.masked_sum(tanh_compressed_frac_per_token, loss_mask) / valid_token_count
         ).detach().item()
-    if target_entropy_per_token is not None:
-        metrics["self_distillation/target_entropy"] = (
-            verl_F.masked_sum(target_entropy_per_token, loss_mask) / valid_token_count
+    # ---- Target-shape statistics (count-based; candidate_s_results §7.6) ----
+    # verl's reduce_metrics() picks np.max / np.min for any plain key whose NAME contains "max"/"min"
+    # (verl/utils/metric/utils.py). The former keys target_max_prob and target_argmax_tail_frac were
+    # therefore max-reduced across micro-batches (= worst-rollout envelopes), not global means.
+    # Rules now: (1) no "max"/"min" substring in any plain key; (2) global ratios are reported as a
+    # masked SUM plus the shared valid-position COUNT, so that mean(sum)/mean(count) after the
+    # equal-weight micro-batch / worker reduction equals the token-weighted global value;
+    # (3) the worst micro-batch is a separate, explicitly MAX-aggregated Metric object.
+    _n_valid = loss_mask.sum().detach().item()
+    _tgt_stats = (
+        ("target_entropy", target_entropy_per_token),
+        ("target_top1_prob", target_max_prob_per_token),
+        ("target_tail_mass", target_tail_mass_per_token),
+        ("target_tail_top1", target_argmax_tail_frac_per_token),
+    )
+    if any(_t is not None for _, _t in _tgt_stats):
+        metrics["self_distillation/target_stat_count"] = _n_valid
+    for _k, _t in _tgt_stats:
+        if _t is None:
+            continue
+        _msum = verl_F.masked_sum(_t, loss_mask)
+        metrics[f"self_distillation/{_k}_sum"] = _msum.detach().item()
+        # equal-weight micro-batch mean (kept for dashboards; NOT token-weighted across micro-batches);
+        # computed exactly as before so the pre-existing keys stay bit-identical.
+        metrics[f"self_distillation/{_k}{'_frac' if _k == 'target_tail_top1' else ''}"] = (
+            _msum / valid_token_count
         ).detach().item()
     if target_max_prob_per_token is not None:
-        metrics["self_distillation/target_max_prob"] = (
-            verl_F.masked_sum(target_max_prob_per_token, loss_mask) / valid_token_count
-        ).detach().item()
+        metrics["self_distillation/target_top1_prob_worst_mb"] = Metric(
+            aggregation=AggregationType.MAX,
+            value=(verl_F.masked_sum(target_max_prob_per_token, loss_mask) / valid_token_count).detach().item(),
+        )
     if floor_clamped_frac_per_token is not None:
         metrics["self_distillation/floor_clamped_frac"] = (
             verl_F.masked_sum(floor_clamped_frac_per_token, loss_mask) / valid_token_count

@@ -151,11 +151,11 @@ check("关闭态也与参照一致", abs(l_base.item() - ref_off) < 1e-5,
 
 check("gate 关时无 tanh 指标", "self_distillation/tanh_compressed_frac" not in m_off)
 check("gate 开时有 tanh 指标", "self_distillation/tanh_compressed_frac" in m_on)
-check("target_max_prob 两侧都记录", "self_distillation/target_max_prob" in m_off
-      and "self_distillation/target_max_prob" in m_on,
-      f"{m_off['self_distillation/target_max_prob']:.4f} -> {m_on['self_distillation/target_max_prob']:.4f}")
+check("target_top1_prob 两侧都记录", "self_distillation/target_top1_prob" in m_off
+      and "self_distillation/target_top1_prob" in m_on,
+      f"{m_off['self_distillation/target_top1_prob']:.4f} -> {m_on['self_distillation/target_top1_prob']:.4f}")
 check("tanh 降低 batch 级目标集中度",
-      m_on["self_distillation/target_max_prob"] < m_off["self_distillation/target_max_prob"])
+      m_on["self_distillation/target_top1_prob"] < m_off["self_distillation/target_top1_prob"])
 check("TV 随之下降", m_on["self_distillation/counterfactual_target_tv"]
       < m_off["self_distillation/counterfactual_target_tv"],
       f"{m_off['self_distillation/counterfactual_target_tv']:.4f} -> "
