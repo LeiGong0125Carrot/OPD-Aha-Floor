@@ -3,7 +3,7 @@
 > 口径：准确率均为 **gpt-oss-120b LLM-as-judge**；TB 用 TreeVGR 官方 HF greedy，V\* 用 OPD-Aha 官方 `infer.py`。
 > 每次跑取 `{30,40,50}` 峰值；初期达标 = 两次跑 TB 峰值 ≥ 50.5 **且** V\* 峰值 ≥ 93.5。
 > 设计与实施计划：`candidate_s_null_free_implementation_plan.md`（v0.1）；代码：OPD-Aha-Floor:sup `df44663`。
-> **状态**：S r1、Sr2 均已出齐（Sr2 12:19）。**两次判定：未达标**（见 §2.2）。
+> **状态**：S r1、Sr2 均已出齐（Sr2 12:19）。**两次判定：未达标**（见 §2.2）。后续 (a) S-tail 已于 10-04 12:51 开跑（`b71a3d8`，tag `pair_St[r2]_6karmA`，hold 20814117）。
 
 > **2026-10-04 复核提示**：原始实验数值及 §1–§6 记录保留；`target_max_prob` / `target_argmax_tail_frac` 的聚合口径存在源码可定位的问题，不能直接作全局均值／位置比例解释。结果与诊断的限定见 [§7 复核补充](#s-metric-review)。本次仅更新文档，未修复代码或新增实验。
 
@@ -96,6 +96,14 @@
 5. **输出变短**：回答长度从 146 降到 85（Ahf 末期 119），与目标过尖一致；格式/截断率尚未单独核对。
 
 **结论（两次齐，10-04 12:30）**：用学生分布直接替代 null 教师的最简形式在本配置下不成立，两次 V\* 都落在 V0 区间。按 §7 的复核限定，这支持"首轮最简 S 没有保住 A 的效果、尤其是 V\*"，不单独证明"null 反事实不可替代"；尾部 / 极端比值是合理的失败假设，其发生比例须用 `ca3245b` 之后的计数式指标重新测量（Sr2 日志仍是旧字段）。
+
+---
+
+## 4.1 与 OPD-Aha 论文的关系（10-04 核对 `revision_opd_arxiv.pdf`）
+
+论文附录 C 的 ablation（Table 5 监督散度 FKL/RKL/JSD；Table 6 概率空间 vs log 概率重构，对照"标准特权目标" V\* 89.0；Table 7 visual null 的构造：高斯噪声 / 不匹配图 / 黑图 / 均值色，Avg6 79.6–80.4）**全部保留 null 前向**，没有"以学生分布为参照"的一组。
+论文方法节（Eq. 2–4 前后）明确排除了这条路："Isolating this surviving visual signal requires a comparison that does not depend on the student's distribution"；"Even when p⁺_t and p^S_t are nearly indistinguishable, u_t can remain nonzero and reveal the visual preference hidden by their agreement"；"Because p⁺_t and p⁰_t use the same teacher and student prefix, u_t attributes the prediction change to visual input rather than differences between models"。
+**定位**：S 不是论文已有的 ablation，而是把论文在动机中排除的比较实际跑了一遍；两次 V\* 落回"标准特权目标"量级（论文 89.0；我们 V0 87.4–88.5），在经验上与论文的论点一致。这一定位可直接用于写作，不构成对论文消融的重复。
 
 ---
 
