@@ -317,6 +317,57 @@ for kw, why in ((dict(counterfactual_reference="null", counterfactual_reference_
     except ValueError: ok = True
     check(f"拦住: {why}", ok)
 
+# ---- 12. S2: 角色互换 (base = sg(p_S), reference = teacher(hidebox)) ----
+print("\n[12] S2 (counterfactual_reference=teacher)")
+def ref_S2(log_t_topk, log_s_topk, mask, beta, tail_zero=False, mutant=None):
+    log_s = add_tail(log_s_topk); log_t = add_tail(log_t_topk)
+    base = log_s.detach(); ref = log_t
+    if mutant == "not_swapped": base, ref = log_t, log_s.detach()
+    u = base - ref
+    if mutant == "sign": u = -u
+    if tail_zero: u = torch.cat([u[..., :-1], torch.zeros_like(u[..., -1:])], -1)
+    log_q = torch.log_softmax(base + beta * u, -1).detach()
+    return (jsd_rows(log_q, log_s) * mask).sum() / mask.sum()
+cS2 = cfg(counterfactual_reference="teacher")
+l_s2, m_s2 = runS(cS2); r_s2 = ref_S2(real0, student0, mask, BETA)
+check("S2 loss 与独立参照一致 (<1e-5)", abs(l_s2.item() - r_s2.item()) < 1e-5, f"{l_s2.item():.8f} vs {r_s2.item():.8f}")
+check("S2 指标 reference_swap_sides=1, reference_is_student=1", m_s2["self_distillation/reference_swap_sides"] == 1.0 and m_s2["self_distillation/reference_is_student"] == 1.0)
+check("S 的 reference_swap_sides=0", mS["self_distillation/reference_swap_sides"] == 0.0)
+for mut, why in (("not_swapped", "没有互换 (=S)"), ("sign", "u 符号反")):
+    rm = ref_S2(real0, student0, mask, BETA, mutant=mut)
+    check(f"抓住变异: {why}", abs(l_s2.item() - rm.item()) > 1e-6, f"{l_s2.item():.8f} vs {rm.item():.8f}")
+check("S2 ≠ S (同输入)", abs(l_s2.item() - lS.item()) > 1e-6)
+# β=0: target = sg(p_S) itself -> JSD(p_S, p_S) = 0
+l_s2b0, _ = runS(cfg(counterfactual_reference="teacher", counterfactual_extrapolation_beta=0.0))
+check("S2 β=0 -> 目标就是学生自己, loss≈0", l_s2b0.item() < 1e-6, f"{l_s2b0.item():.2e}")
+# p_T = p_S -> u=0 -> target = p_S -> loss 0
+l_s2eq, _ = runS(cS2, real=student0.clone())
+check("S2 p_T=p_S -> loss≈0", l_s2eq.item() < 1e-6)
+# 数值例: 学生 striped .6 / diamond .3, hidebox 教师 .3/.6 -> odds = (0.6/0.3)^5 * (0.3/0.6)^-4 = 512
+check("S2 pairwise odds 例: 2 * (2/0.5)^4 = 512", abs(odds_S(2.0, 0.5) - 512) < 1e-9)
+# S2 + tail_u_zero
+l_s2t, m_s2t = runS(cfg(counterfactual_reference="teacher", counterfactual_reference_tail_u_zero=True))
+r_s2t = ref_S2(real0, student0, mask, BETA, tail_zero=True)
+check("S2 + tail_u_zero 与参照一致", abs(l_s2t.item() - r_s2t.item()) < 1e-5)
+# 梯度: 目标是常数 (含学生自己的 detach 拷贝)
+sQ = student0.clone().requires_grad_(True); lQ, _ = runS(cS2, student=sQ); lQ.backward()
+sQr = student0.clone().requires_grad_(True); lQr = ref_S2(real0, sQr, mask, BETA); lQr.backward()
+check("S2 梯度与常数目标参照一致 (学生侧 base 已 detach)", torch.allclose(sQ.grad, sQr.grad, atol=1e-6), f"max|Δ|={(sQ.grad - sQr.grad).abs().max().item():.2e}")
+ok = False
+try: run(cS2)
+except ValueError: ok = True
+check("拦住: teacher 模式却传入 null 张量", ok)
+_lt3, _ls3 = add_tail(real0), add_tail(student0)
+_kl_ref = ((_lt3.exp() * (_lt3 - _ls3)).sum(-1) * mask).sum() / mask.sum()
+check("S2 的 teacher_student_kl 仍是 KL(p_T‖p_S) (非 0)", abs(m_s2["self_distillation/teacher_student_kl"] - _kl_ref.item()) < 1e-5 and m_s2["self_distillation/teacher_student_kl"] > 1e-3,
+      f"{m_s2['self_distillation/teacher_student_kl']:.5f} vs {_kl_ref.item():.5f}")
+check("S2 的 counterfactual_target_tv 是目标相对学生自身的 TV (>0)", m_s2["self_distillation/counterfactual_target_tv"] > 1e-3)
+for kw in (dict(counterfactual_u_clip_pos=True), dict(counterfactual_hist_adaptive_beta=True)):
+    ok = False
+    try: runS(cfg(counterfactual_reference="teacher", **kw))
+    except ValueError as e: ok = "mutually exclusive" in str(e)
+    check(f"拦住: teacher + {list(kw)[0]}", ok)
+
 # ---- 9. 与改动前代码 (sup@bea75c6) 逐比特回归: null 路径 loss 与梯度必须完全不变 ----
 print("\n[9] 与 bea75c6 的 core_algos 逐比特回归 (reference=null 路径)")
 import subprocess, importlib.util, tempfile

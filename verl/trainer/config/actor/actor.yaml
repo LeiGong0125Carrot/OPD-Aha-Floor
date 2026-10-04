@@ -156,6 +156,8 @@ self_distillation:
   # (OPD-Aha, needs the null forward). "student" = candidate S: the CURRENT student's own
   # distribution (detached) -- no null images are built and no null forward runs; null_mode must
   # still be set (it gates reconstruction). First round: incompatible with every other tilt variant.
+  # "teacher" = candidate S2 (roles swapped): base = sg(p_student), reference = the single teacher forward
+  # (e.g. full image with the GT box region blanked); u = log sg(p_S) - log p_T. Also null-free.
   counterfactual_reference: "null"
   # S-tail (only with reference=student): u is defined on the explicit top-k tokens; the tail bucket's u
   # is forced to 0 so the aggregated tail mass is neither boosted nor suppressed by the tilt.

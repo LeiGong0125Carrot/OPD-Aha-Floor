@@ -1116,6 +1116,9 @@ def compute_self_distillation_loss(
     # docs/negative_history/candidate_s_null_free_implementation_plan.md §11):
     #   "null"    -> p_ref = teacher on the matched visual-null view (OPD-Aha; needs the null forward)
     #   "student" -> p_ref = the CURRENT student's own distribution, detached (no null forward at all)
+    #   "teacher" -> ROLES SWAPPED (candidate S2): base = sg(p_student), p_ref = the single teacher forward
+    #                (fed e.g. the full image with the GT box region blanked), u = log sg(p_S) - log p_T.
+    #                No privileged teacher and no null forward.
     # Reconstruction on/off stays keyed on counterfactual_null_mode; this field only picks the reference.
     counterfactual_reference = str(
         getattr(self_distillation_config, "counterfactual_reference", "null") or "null"
@@ -1197,11 +1200,12 @@ def compute_self_distillation_loss(
     counterfactual_hist_half = str(
         getattr(self_distillation_config, "counterfactual_hist_half", "neg") or "neg"
     )
-    if counterfactual_reference not in ("null", "student"):
+    if counterfactual_reference not in ("null", "student", "teacher"):
         raise ValueError(
-            f"counterfactual_reference must be 'null' or 'student', got {counterfactual_reference!r}"
+            f"counterfactual_reference must be 'null', 'student' or 'teacher', got {counterfactual_reference!r}"
         )
-    _ref_student = counterfactual_reference == "student"
+    _ref_student = counterfactual_reference in ("student", "teacher")   # both are null-free modes
+    _swap_sides = counterfactual_reference == "teacher"
     if _ref_student:
         # Runtime guards (dataclass __post_init__ is dead code on this training path).
         if counterfactual_null_mode is None:
@@ -1448,7 +1452,14 @@ def compute_self_distillation_loss(
             teacher_null_distill_log_probs = teacher_null_all_log_probs
 
         if counterfactual_null_mode is not None:
-            if _ref_student:
+            _true_teacher_distill_log_probs = teacher_real_distill_log_probs   # for diagnostics (pre-swap)
+            if _swap_sides:
+                # Candidate S2: base = sg(p_student); reference = the teacher forward (hidebox view).
+                # Reuse the same code path by swapping the two tensors; both are no-grad.
+                with torch.no_grad():
+                    teacher_null_distill_log_probs = teacher_real_distill_log_probs
+                    teacher_real_distill_log_probs = student_distill_log_probs.detach()
+            elif _ref_student:
                 # Candidate S: the reference is the student's OWN distribution on the same
                 # support (already add_tail'ed / renormalised above), detached so that no
                 # gradient flows through the target. Not an in-place op on the student tensor.
@@ -1479,9 +1490,10 @@ def compute_self_distillation_loss(
                 _u_valid = _u_abs[loss_mask > 0]
                 cf_u_p90 = _u_valid.float().quantile(0.9).item() if _u_valid.numel() else 0.0
                 del _u_valid
-                _p_real = teacher_real_distill_log_probs.exp()
+                # always w.r.t. the ACTUAL teacher forward (in S2 the "real" slot holds the student base)
+                _p_real = _true_teacher_distill_log_probs.exp()
                 teacher_student_kl_per_token = (
-                    _p_real * (teacher_real_distill_log_probs - student_distill_log_probs.detach())
+                    _p_real * (_true_teacher_distill_log_probs - student_distill_log_probs.detach())
                 ).sum(dim=-1)
                 if use_topk and self_distillation_config.distillation_add_tail:
                     teacher_tail_mass_per_token = _p_real[..., -1]
@@ -1731,6 +1743,7 @@ def compute_self_distillation_loss(
             verl_F.masked_sum(counterfactual_target_tv_per_token, loss_mask) / valid_token_count
         ).detach().item()
     metrics["self_distillation/reference_is_student"] = float(_ref_student)
+    metrics["self_distillation/reference_swap_sides"] = float(_swap_sides)
     for _k, _t in (
         ("counterfactual_u_abs_mean", cf_u_abs_mean_per_token),
         ("counterfactual_u_frac_pos", cf_u_frac_pos_per_token),

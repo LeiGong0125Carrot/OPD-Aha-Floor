@@ -132,7 +132,7 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_hist_half: str = "neg"  # "neg" (suppression, C/Ahm/Ahf) | "pos" (X1 re-grounding)
     # Reference for u = log p_real - log p_ref: "null" (matched visual-null teacher, OPD-Aha) or
     # "student" (candidate S: the current student's own distribution, detached; NO null forward).
-    counterfactual_reference: str = "null"
+    counterfactual_reference: str = "null"   # "null" | "student" (S) | "teacher" (S2: base=sg(p_S), ref=teacher view)
     # S-tail: with reference=student, define u only on the explicit top-k set (tail bucket u = 0).
     counterfactual_reference_tail_u_zero: bool = False
     teacher_prompt_mode: Optional[str] = None
@@ -288,14 +288,14 @@ class SelfDistillationConfig(BaseConfig):
                 )
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")
-        if self.counterfactual_reference not in ("null", "student"):
+        if self.counterfactual_reference not in ("null", "student", "teacher"):
             raise ValueError(
-                "self_distillation.counterfactual_reference must be 'null' or 'student', "
+                "self_distillation.counterfactual_reference must be 'null', 'student' or 'teacher', "
                 f"got {self.counterfactual_reference}"
             )
-        if self.counterfactual_reference_tail_u_zero and self.counterfactual_reference != "student":
-            raise ValueError("counterfactual_reference_tail_u_zero requires counterfactual_reference='student'")
-        if self.counterfactual_reference == "student":
+        if self.counterfactual_reference_tail_u_zero and self.counterfactual_reference == "null":
+            raise ValueError("counterfactual_reference_tail_u_zero requires a null-free reference (student/teacher)")
+        if self.counterfactual_reference in ("student", "teacher"):
             if self.counterfactual_null_mode is None:
                 raise ValueError(
                     "counterfactual_reference='student' requires counterfactual_null_mode (reconstruction gate)"
