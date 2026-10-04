@@ -37,12 +37,13 @@
 | Ahmr2 | 46.42 / 47.16 / 49.88 | 49.88 | 92.15 / 92.67 / 93.19 | 93.19 | ✗ TB、V\* |
 | **Ahf** | 50.37 / 47.65 / **51.60** | **51.60** | 91.10 / 93.19 / **93.72** | **93.72** | **✓ TB，✓ V\*** |
 | Ahfr2 | 46.17 / 48.40 / 50.62 | 50.62 | 89.53 / 92.15 / 92.67 | 92.67 | ✓ TB，✗ V\*（差 0.8） |
-| **X1m** | 47.65 / 44.94 / 47.41 | 47.65 | 89.53 / 91.62 / 92.67 | 92.67 | **✗ TB、V\***（池化 TB 46.67，低于 Ahm） |
+| **X1m** | 47.65 / 44.94 / 47.41 | 47.65 | 89.53 / 91.62 / 92.67 | 92.67 | **✗ TB、V\*** |
+| **X1mr2** | 47.90 / 49.14 / 47.41 | 49.14 | 92.15 / 92.15 / 91.10 | 92.15 | **✗ TB、V\*** |
 
 **判定**
 - **Ahm：未达标**（TB 两次都 < 50.5）。
 - **Ahf：TB 两次达标；V\* 一次达标（93.72）、一次差 0.8（92.67）。** 第 1 次是本季第一个双基准同时过初期口径的臂；按"两次都过"的严格读法整体仍差 V\* 半步。
-- **X1：第 1 次判负**（TB 峰 47.65 < Ahm 的 48.64）。分类别相对 A：Spatial Containment −7.3、OCR −6.4、Comparison −4.5、Material −3.4；Attributes +5.7。X1 不动负半边而 OCR 掉得更多，**否定了 §3.2 的"负向抑制伤 OCR"假设**；更合理的读法是任何让目标更尖的改动（X1 target_tv 0.337，A 0.269）都伤 OCR 和关系推理，不管尖在哪一半。按 §4 决策树，**X2 不上**。X1mr2 按两次规则补跑（补分类别对比），不改变判定。
+- **X1：两次均判负**（TB 峰 47.65 / 49.14，V\* 峰 92.67 / 92.15；6 ckpt 池化 TB 47.41，与 Ahm 47.94 同带、低于 A 49.22）。第 1 次读数：分类别相对 A：Spatial Containment −7.3、OCR −6.4、Comparison −4.5、Material −3.4；Attributes +5.7。X1 不动负半边而 OCR 掉得更多，**否定了 §3.2 的"负向抑制伤 OCR"假设**；更合理的读法是任何让目标更尖的改动（X1 target_tv 0.337，A 0.269）都伤 OCR 和关系推理，不管尖在哪一半。按 §4 决策树，**X2 不上**。X1mr2 按两次规则补跑（补分类别对比），不改变判定。
 
 ### 2.2 池化（逐题，同方法全部 checkpoint 合并）
 
@@ -69,20 +70,22 @@ Ahf 的 TB 池化与 A 相差 0.08，V\* 池化低 0.8；Ahm 的 TB 池化低 1.
 
 ### 2.4 TB 分类别对比（池化，A 9 ckpt / Ahm 6 / Ahf 6）
 
-| 类别 (n) | A | Ahm | Ahf | Ahm−A | Ahf−A |
-|---|---|---|---|---|---|
-| Reasoning/Perspective Transform (85) | 14.1 | 14.1 | 14.5 | +0.0 | +0.4 |
-| Perception/OCR (68) | **77.9** | 73.0 | 75.0 | **−4.9** | −2.9 |
-| Reasoning/Ordering (57) | 38.2 | 34.8 | **39.8** | **−3.4** | +1.6 |
-| Reasoning/Comparison (44) | 50.8 | 50.8 | 51.1 | +0.0 | +0.4 |
-| Reasoning/Contact and Occlusion (41) | 47.7 | 46.3 | 46.3 | −1.4 | −1.4 |
-| Reasoning/Spatial Containment (29) | 69.3 | 68.4 | 66.7 | −1.0 | −2.7 |
-| Perception/Attributes (29) | 55.2 | 55.2 | 58.0 | +0.0 | +2.9 |
-| Perception/Physical State (23) | 61.4 | **66.7** | 64.5 | **+5.3** | +3.1 |
-| Perception/Object Retrieval (16) | 83.3 | 82.3 | 85.4 | −1.0 | +2.1 |
-| Perception/Material (13) | 54.7 | 53.8 | 52.6 | −0.9 | −2.1 |
+| 类别 (n) | A | Ahm | Ahf | X1 | Ahm−A | Ahf−A | X1−A |
+|---|---|---|---|---|---|---|---|
+| Reasoning/Perspective Transform (85) | 14.1 | 14.1 | 14.5 | 12.9 | +0.0 | +0.4 | −1.2 |
+| Perception/OCR (68) | **77.9** | 73.0 | 75.0 | 72.3 | **−4.9** | −2.9 | **−5.6** |
+| Reasoning/Ordering (57) | 38.2 | 34.8 | **39.8** | 36.5 | **−3.4** | +1.6 | −1.7 |
+| Reasoning/Comparison (44) | 50.8 | 50.8 | 51.1 | 47.0 | +0.0 | +0.4 | **−3.8** |
+| Reasoning/Contact and Occlusion (41) | 47.7 | 46.3 | 46.3 | 45.1 | −1.4 | −1.4 | −2.6 |
+| Reasoning/Spatial Containment (29) | 69.3 | 68.4 | 66.7 | 64.4 | −1.0 | −2.7 | **−5.0** |
+| Perception/Attributes (29) | 55.2 | 55.2 | 58.0 | **62.1** | +0.0 | +2.9 | **+6.9** |
+| Perception/Physical State (23) | 61.4 | **66.7** | 64.5 | 65.2 | **+5.3** | +3.1 | +3.9 |
+| Perception/Object Retrieval (16) | 83.3 | 82.3 | 85.4 | 83.3 | −1.0 | +2.1 | +0.0 |
+| Perception/Material (13) | 54.7 | 53.8 | 52.6 | 52.6 | −0.9 | −2.1 | −2.1 |
 
-单类别 n = 13–85，类别 SE 约 4–6 点，只读 ≥3 点的差异。
+单类别 n = 13–85，类别 SE 约 4–6 点，只读 ≥3 点的差异。X1 列为两次 6 ckpt 池化（10-04 补）。
+
+**X1 两次合并后的类别形态**：OCR −5.6、Spatial Containment −5.0、Comparison −3.8；Attributes +6.9、Physical State +3.9。与 Ahm（动负半边）的"OCR 掉、Attributes/Physical 涨"形态相同、幅度更大。**两半各自加强都复现同一形态**，支持 §3.2 修正后的读法：伤 OCR / 关系推理的是目标变尖本身，不是哪一半被动。
 
 **稳定翻转**（A 在 9 个 ckpt 中 ≥7 次对、X 在 6 个 ckpt 中 ≤1 次对，及反向）：
 
@@ -315,9 +318,11 @@ odds = (p⁺ 比)^(1+β) × (参照比)^(−β)。
 
 词表级方向在零 null 约束下只有 S 一条路；其余只能做"挑位置"。
 
-#### 7.7.7 排程
+#### 7.7.7 进展（10-04 凌晨）
 
-X1 第 1 次判负（§3），X2 不上。S 排在 X1mr2（约 10-04 03:00 结束）之后，跑两次；代码在此之前写好、测试、review。
+- 实现已落地：OPD-Aha-Floor:sup `df44663`（`counterfactual_reference=student`，详细规格见 `candidate_s_null_free_implementation_plan.md`）。独立 code review 无阻塞项；5 条建议已修。`scripts/test_sref.py` 9 组全绿，其中第 9 组验证 reference=null 路径与 `bea75c6` 在 12 配置 × 2 聚合下 loss / 梯度 / 指标 **bit-identical**。
+- **冒烟通过**（03:47，2 步，`VOPD_FORBID_NULL=1`）：`reference_is_student=1`、`teacher_null_forward_frac=0`、`counterfactual_mean_color_fraction=0`、无 NaN、`sd_manifest.json` 写出。**反向检查通过**（03:51）：A 配置（sup 启动器）在禁 null 开关下如期报错，说明开关覆盖了 null 入口。
+- S r1 在 hold 20781321 上训练，Sr2 在第二张 hold（排队中）并行；两次均带 `VOPD_FORBID_NULL=1`。X1 两次判负，X2 不上。
 
 ---
 
