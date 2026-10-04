@@ -11,7 +11,9 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
-export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_S${RUN_SUFFIX:-}_6karmA}"
+REF_TAIL_U_ZERO="${REF_TAIL_U_ZERO:-0}"   # 1 -> S-tail variant (tag pair_St*): tail bucket u = 0
+TAG=S; [ "$REF_TAIL_U_ZERO" = 1 ] && TAG=St
+export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${TAG}${RUN_SUFFIX:-}_6karmA}"
 export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet}"
 
 export TEACHER_MODEL_SOURCE=legacy TEACHER_REGULARIZATION=frozen TEACHER_UPDATE_RATE=0.0
@@ -24,11 +26,12 @@ export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export ACTOR_USE_DYNAMIC_BSZ=False
 export VOPD_FORBID_NULL="${VOPD_FORBID_NULL:-1}"
 
-echo "${EXPERIMENT_NAME_OVERRIDE}: candidate S -- A tilt with STUDENT reference (no null forward), β=${COUNTERFACTUAL_EXTRAPOLATION_BETA} (seed42, pair), VOPD_FORBID_NULL=${VOPD_FORBID_NULL}"
+echo "${EXPERIMENT_NAME_OVERRIDE}: candidate S -- A tilt with STUDENT reference (no null forward), β=${COUNTERFACTUAL_EXTRAPOLATION_BETA}, tail_u_zero=${REF_TAIL_U_ZERO} (seed42, pair), VOPD_FORBID_NULL=${VOPD_FORBID_NULL}"
 echo "  并行配置: n_gpus=${TRAINER_N_GPUS_PER_NODE} ulysses_sp=${ULYSSES_SP:-1} rollout_n=${ROLLOUT_N} lr=${LR}  <- 复现跑必须逐项相同"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.counterfactual_null_scope=last \
     actor_rollout_ref.actor.self_distillation.counterfactual_reference=student \
+    actor_rollout_ref.actor.self_distillation.counterfactual_reference_tail_u_zero="$([ "$REF_TAIL_U_ZERO" = 1 ] && echo True || echo False)" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size="${ULYSSES_SP:-1}" \

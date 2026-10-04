@@ -157,6 +157,9 @@ self_distillation:
   # distribution (detached) -- no null images are built and no null forward runs; null_mode must
   # still be set (it gates reconstruction). First round: incompatible with every other tilt variant.
   counterfactual_reference: "null"
+  # S-tail (only with reference=student): u is defined on the explicit top-k tokens; the tail bucket's u
+  # is forced to 0 so the aggregated tail mass is neither boosted nor suppressed by the tilt.
+  counterfactual_reference_tail_u_zero: false
 
   # Suppression-only tilt: clamp u = log p_real - log p_null at 0 from above,
   # i.e. q ∝ p_real * exp(beta * min(u, 0)). Only the negative half of the

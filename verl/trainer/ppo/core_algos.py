@@ -1120,6 +1120,12 @@ def compute_self_distillation_loss(
     counterfactual_reference = str(
         getattr(self_distillation_config, "counterfactual_reference", "null") or "null"
     )
+    # Candidate S-tail (candidate_s_results §5 (a)): the student reference is only trusted where the
+    # student actually places mass -- u is defined on the explicit top-k set and forced to 0 on the
+    # tail bucket, so the aggregated tail can neither be boosted nor suppressed by the tilt.
+    counterfactual_reference_tail_u_zero = bool(
+        getattr(self_distillation_config, "counterfactual_reference_tail_u_zero", False)
+    )
     counterfactual_extrapolation_beta = float(
         getattr(self_distillation_config, "counterfactual_extrapolation_beta", 1.0)
     )
@@ -1224,6 +1230,11 @@ def compute_self_distillation_loss(
                 "counterfactual_reference='student' but null-teacher log-probs were passed: the null "
                 "forward must be skipped end-to-end, not silently ignored (config contradiction)."
             )
+    if counterfactual_reference_tail_u_zero:
+        if not _ref_student:
+            raise ValueError("counterfactual_reference_tail_u_zero requires counterfactual_reference='student'")
+        if not bool(getattr(self_distillation_config, "distillation_add_tail", True)):
+            raise ValueError("counterfactual_reference_tail_u_zero requires distillation_add_tail=True (there is no tail column otherwise)")
     _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
     if counterfactual_hist_adaptive_beta:
         if counterfactual_hist_half not in ("neg", "pos"):
@@ -1450,6 +1461,10 @@ def compute_self_distillation_loss(
             # Configurable residual extrapolation in log-probability space:
             # q = softmax(log p_real + beta * (log p_real - log p_ref)).
             u_term = teacher_real_distill_log_probs - teacher_null_distill_log_probs
+            if counterfactual_reference_tail_u_zero:
+                # S-tail: last column is the tail bucket (add_tail); zero its u. Not in-place on a
+                # tensor that aliases the student (u_term is a fresh no-grad tensor).
+                u_term = torch.cat([u_term[..., :-1], torch.zeros_like(u_term[..., -1:])], dim=-1)
             if not torch.isfinite(u_term[loss_mask > 0]).all():
                 raise FloatingPointError(
                     "non-finite u = log p_real - log p_ref on a valid position "

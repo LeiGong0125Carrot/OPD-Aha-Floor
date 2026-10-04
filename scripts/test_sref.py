@@ -277,6 +277,46 @@ check("生产 target_top1_prob_sum / target_tail_top1_sum / count 与手算一�
       abs(mS3["self_distillation/target_top1_prob_sum"] - _top1) < 1e-5 and abs(mS3["self_distillation/target_tail_top1_sum"] - _tail) < 1e-9
       and mS3["self_distillation/target_stat_count"] == m2.sum().item())
 
+# ---- 11. S-tail: tail 桶 u=0 ----
+print("\n[11] S-tail (counterfactual_reference_tail_u_zero)")
+def ref_St(log_t_topk, log_s_topk, mask, beta, mutant=None):
+    log_s = add_tail(log_s_topk); log_t = add_tail(log_t_topk)
+    u = log_t - log_s.detach()
+    if mutant == "no_zero":
+        pass
+    elif mutant == "zero_first":
+        u = torch.cat([torch.zeros_like(u[..., :1]), u[..., 1:]], -1)
+    else:
+        u = torch.cat([u[..., :-1], torch.zeros_like(u[..., -1:])], -1)
+    log_q = torch.log_softmax(log_t + beta * u, -1).detach()
+    return (jsd_rows(log_q, log_s) * mask).sum() / mask.sum()
+cSt = cfg(counterfactual_reference="student", counterfactual_reference_tail_u_zero=True)
+l_st, m_st = runS(cSt); r_st = ref_St(real0, student0, mask, BETA)
+check("S-tail loss 与独立参照一致 (<1e-5)", abs(l_st.item() - r_st.item()) < 1e-5, f"{l_st.item():.8f} vs {r_st.item():.8f}")
+for mut, why in (("no_zero", "没有把 tail 的 u 置零 (=S)"), ("zero_first", "置零了错误的列")):
+    rm = ref_St(real0, student0, mask, BETA, mutant=mut)
+    check(f"抓住变异: {why}", abs(l_st.item() - rm.item()) > 1e-6, f"{l_st.item():.8f} vs {rm.item():.8f}")
+check("开关关闭时与 S bit-identical", torch.equal(runS(cfg(counterfactual_reference="student", counterfactual_reference_tail_u_zero=False))[0], lS))
+# §6.2 例: tail u=0 后 tail 不再被抬升 -> 权重 [0.0125, 1.2642, 0.20, 0.20(=p+_tail)] -> tail 不再是 argmax
+_, m62t = run(cfg(counterfactual_reference="student", counterfactual_reference_tail_u_zero=True, distillation_topk=3, distillation_add_tail=True),
+              student=s62, real=t62, null=None, null_lp=None, msk=m1, lpp=torch.zeros(1, 1), tl=torch.zeros(1, 1))
+w62t = torch.tensor([0.0125, 1.264197530864, 0.20, 0.20]); q62t = w62t / w62t.sum()
+check("§6.2 例在 S-tail 下: tail 质量 = 0.1195, argmax 不再是 tail",
+      abs(m62t["self_distillation/target_tail_mass"] - q62t[-1].item()) < 1e-6 and m62t["self_distillation/target_tail_top1_frac"] == 0.0,
+      f"tail_mass={m62t['self_distillation/target_tail_mass']:.4f}")
+sG = student0.clone().requires_grad_(True); lG, _ = runS(cSt, student=sG); lG.backward()
+sR2 = student0.clone().requires_grad_(True); lR2 = ref_St(real0, sR2, mask, BETA); lR2.backward()
+check("S-tail 梯度与常数目标参照一致", torch.allclose(sG.grad, sR2.grad, atol=1e-6))
+for kw, why in ((dict(counterfactual_reference="null", counterfactual_reference_tail_u_zero=True), "tail_u_zero 但 reference=null"),
+                (dict(counterfactual_reference="student", counterfactual_reference_tail_u_zero=True, distillation_add_tail=False), "tail_u_zero 但无 tail 列")):
+    ok = False
+    try:
+        c = cfg(**kw)
+        if kw["counterfactual_reference"] == "null": run(c)
+        else: runS(c)
+    except ValueError: ok = True
+    check(f"拦住: {why}", ok)
+
 # ---- 9. 与改动前代码 (sup@bea75c6) 逐比特回归: null 路径 loss 与梯度必须完全不变 ----
 print("\n[9] 与 bea75c6 的 core_algos 逐比特回归 (reference=null 路径)")
 import subprocess, importlib.util, tempfile

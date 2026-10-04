@@ -133,6 +133,8 @@ class SelfDistillationConfig(BaseConfig):
     # Reference for u = log p_real - log p_ref: "null" (matched visual-null teacher, OPD-Aha) or
     # "student" (candidate S: the current student's own distribution, detached; NO null forward).
     counterfactual_reference: str = "null"
+    # S-tail: with reference=student, define u only on the explicit top-k set (tail bucket u = 0).
+    counterfactual_reference_tail_u_zero: bool = False
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -291,6 +293,8 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.counterfactual_reference must be 'null' or 'student', "
                 f"got {self.counterfactual_reference}"
             )
+        if self.counterfactual_reference_tail_u_zero and self.counterfactual_reference != "student":
+            raise ValueError("counterfactual_reference_tail_u_zero requires counterfactual_reference='student'")
         if self.counterfactual_reference == "student":
             if self.counterfactual_null_mode is None:
                 raise ValueError(
