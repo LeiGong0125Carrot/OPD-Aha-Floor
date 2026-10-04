@@ -733,6 +733,10 @@ class RayPPOTrainer:
         # null_scope="last": only the final image per row is blanked (shared-context
         # pair views [full image, crop] keep the full image so the contrast isolates
         # the crop's contribution). "all" = official behavior (every image blanked).
+        if os.environ.get("VOPD_FORBID_NULL") == "1":
+            raise RuntimeError(
+                "VOPD_FORBID_NULL=1: the visual-null view was requested (this run must be null-free)."
+            )
         null_images = []
         last_idx = len(teacher_images) - 1
         for idx, image in enumerate(teacher_images):
@@ -1296,6 +1300,12 @@ class RayPPOTrainer:
         if use_teacher_always_on_inputs:
             teacher_image_key = self_distillation_cfg.teacher_image_key
             counterfactual_null_mode = self_distillation_cfg.get("counterfactual_null_mode", None)
+            # Candidate S: reference="student" -> no null view is built at all (the loss uses the
+            # student's own distribution as the reference; dp_actor skips the null forward).
+            _build_null_view = (
+                counterfactual_null_mode == "mean_color"
+                and str(self_distillation_cfg.get("counterfactual_reference", "null") or "null") == "null"
+            )
             if teacher_image_key not in batch.non_tensor_batch:
                 raise KeyError(f"Teacher image key `{teacher_image_key}` not found in batch.non_tensor_batch")
             fallback_to_policy_loss = self_distillation_cfg.get("fallback_to_policy_loss_on_missing_teacher", False)
@@ -1359,7 +1369,7 @@ class RayPPOTrainer:
                 teacher_response_start_idx_list.append(teacher_response_start_idx)
                 teacher_multi_modal_inputs_list.append(teacher_multi_modal_inputs)
 
-                if counterfactual_null_mode == "mean_color":
+                if _build_null_view:
                     teacher_null_images = self._mean_color_teacher_images(
                         teacher_images,
                         null_scope=self_distillation_cfg.get("counterfactual_null_scope", "all"),
@@ -1433,11 +1443,11 @@ class RayPPOTrainer:
                 "self_distillation/policy_fallback_fraction": (1.0 - teacher_present_mask.mean()).item(),
                 "self_distillation/grpo_fallback_count": grpo_fallback_count,
                 "self_distillation/counterfactual_mean_color_fraction": (
-                    teacher_present_mask.mean().item() if counterfactual_null_mode == "mean_color" else 0.0
+                    teacher_present_mask.mean().item() if _build_null_view else 0.0
                 ),
             }
             teacher_non_tensors = {"teacher_multi_modal_inputs": teacher_multi_modal_inputs_list}
-            if counterfactual_null_mode == "mean_color":
+            if _build_null_view:
                 teacher_non_tensors["teacher_null_multi_modal_inputs"] = teacher_null_multi_modal_inputs_list
             return DataProto.from_dict(
                 tensors={
@@ -2330,6 +2340,44 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
+    def _write_self_distillation_manifest(self) -> None:
+        """Machine-readable record of the resolved self-distillation config + git commit, written
+        next to the checkpoints (gitignored). Lets a run be audited later without re-deriving the
+        launcher environment (candidate S plan §16). Never fatal."""
+        try:
+            sd_cfg = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+            if sd_cfg is None:
+                return
+            import subprocess
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            try:
+                commit = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True, timeout=10).strip()
+            except Exception:
+                commit = "unknown"
+            out_dir = self.config.trainer.default_local_dir
+            os.makedirs(out_dir, exist_ok=True)
+            manifest = {
+                "git_commit": commit,
+                "experiment_name": self.config.trainer.experiment_name,
+                "self_distillation": OmegaConf.to_container(sd_cfg, resolve=True),
+                "actor": {
+                    k: self.config.actor_rollout_ref.actor.get(k, None)
+                    for k in ("ppo_mini_batch_size", "ppo_micro_batch_size_per_gpu", "ulysses_sequence_parallel_size")
+                },
+                "optim_lr": self.config.actor_rollout_ref.actor.optim.get("lr", None),
+                "rollout_n": self.config.actor_rollout_ref.rollout.get("n", None),
+                "data": {k: self.config.data.get(k, None) for k in ("train_files", "train_batch_size", "seed")},
+                "trainer": {
+                    k: self.config.trainer.get(k, None)
+                    for k in ("n_gpus_per_node", "nnodes", "total_training_steps", "save_freq")
+                },
+                "env": {k: os.environ.get(k) for k in ("VOPD_FORBID_NULL", "EXPERIMENT_NAME_OVERRIDE")},
+            }
+            with open(os.path.join(out_dir, "sd_manifest.json"), "w") as f:
+                json.dump(manifest, f, indent=2, default=str, ensure_ascii=False)
+        except Exception as e:  # noqa: BLE001
+            print(f"[sd_manifest] skipped: {e!r}")
+
     def fit(self):
         """
         The training loop of PPO.
@@ -2348,6 +2396,7 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
             group_name=self.config.trainer.get("group_name", None),
         )
+        self._write_self_distillation_manifest()
 
         self.global_steps = 0
 

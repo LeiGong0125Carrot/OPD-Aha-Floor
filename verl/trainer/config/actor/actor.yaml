@@ -152,6 +152,12 @@ self_distillation:
   # (pair views [full, crop]: keep the full image, blank only the crop).
   counterfactual_null_scope: all
 
+  # Reference distribution for u = log p_real - log p_ref. "null" = matched visual-null teacher
+  # (OPD-Aha, needs the null forward). "student" = candidate S: the CURRENT student's own
+  # distribution (detached) -- no null images are built and no null forward runs; null_mode must
+  # still be set (it gates reconstruction). First round: incompatible with every other tilt variant.
+  counterfactual_reference: "null"
+
   # Suppression-only tilt: clamp u = log p_real - log p_null at 0 from above,
   # i.e. q ∝ p_real * exp(beta * min(u, 0)). Only the negative half of the
   # visual contrast enters the target; false = official full tilt.

@@ -31,6 +31,8 @@ PPO_RAY_RUNTIME_ENV = {
         # https://docs.vllm.ai/en/latest/usage/troubleshooting.html?h=nccl_cumem_enable#known-issues
         # https://github.com/vllm-project/vllm/blob/c6b0a7d3ba03ca414be1174e9bd86a97191b7090/vllm/worker/worker_base.py#L445
         "NCCL_CUMEM_ENABLE": "0",
+        # Null-free audit switch (candidate S): must reach the actor workers, not only the driver.
+        "VOPD_FORBID_NULL": os.environ.get("VOPD_FORBID_NULL", "0"),
     },
 }
 

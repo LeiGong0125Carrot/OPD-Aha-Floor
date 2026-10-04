@@ -1111,6 +1111,14 @@ def compute_self_distillation_loss(
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
 
     counterfactual_null_mode = getattr(self_distillation_config, "counterfactual_null_mode", None)
+    # Reference distribution for the tilt u = log p_real - log p_ref (candidate S,
+    # docs/negative_history/candidate_s_null_free_implementation_plan.md §11):
+    #   "null"    -> p_ref = teacher on the matched visual-null view (OPD-Aha; needs the null forward)
+    #   "student" -> p_ref = the CURRENT student's own distribution, detached (no null forward at all)
+    # Reconstruction on/off stays keyed on counterfactual_null_mode; this field only picks the reference.
+    counterfactual_reference = str(
+        getattr(self_distillation_config, "counterfactual_reference", "null") or "null"
+    )
     counterfactual_extrapolation_beta = float(
         getattr(self_distillation_config, "counterfactual_extrapolation_beta", 1.0)
     )
@@ -1182,6 +1190,39 @@ def compute_self_distillation_loss(
     counterfactual_hist_half = str(
         getattr(self_distillation_config, "counterfactual_hist_half", "neg") or "neg"
     )
+    if counterfactual_reference not in ("null", "student"):
+        raise ValueError(
+            f"counterfactual_reference must be 'null' or 'student', got {counterfactual_reference!r}"
+        )
+    _ref_student = counterfactual_reference == "student"
+    if _ref_student:
+        # Runtime guards (dataclass __post_init__ is dead code on this training path).
+        if counterfactual_null_mode is None:
+            raise ValueError(
+                "counterfactual_reference='student' requires counterfactual_null_mode to be set "
+                "(it gates target reconstruction); with null_mode=None this would silently be V0."
+            )
+        if not self_distillation_config.full_logit_distillation or getattr(
+                self_distillation_config, "distillation_topk", None) is None:
+            raise ValueError(
+                "counterfactual_reference='student' requires full_logit_distillation=True with a top-k "
+                "support (the student-reference target is defined on the student's top-k + tail)."
+            )
+        if (counterfactual_u_clip_pos or counterfactual_st_enable or counterfactual_floor_alpha > 0.0
+                or counterfactual_tanh_scale > 0.0 or counterfactual_target_gamma != 1.0
+                or counterfactual_hist_adaptive_beta or counterfactual_future_weight
+                or counterfactual_hist_shuffle):
+            raise ValueError(
+                "counterfactual_reference='student' (arm S, first round) is mutually exclusive with "
+                "u_clip_pos / st_enable / floor_alpha / tanh_scale / target_gamma!=1 / hist / future / "
+                "hist_shuffle (single-variable discipline, candidate S plan §11.2)."
+            )
+        if (teacher_null_topk_log_probs is not None or teacher_null_all_log_probs is not None
+                or teacher_null_log_probs is not None):
+            raise ValueError(
+                "counterfactual_reference='student' but null-teacher log-probs were passed: the null "
+                "forward must be skipped end-to-end, not silently ignored (config contradiction)."
+            )
     _nh_any = counterfactual_hist_adaptive_beta or counterfactual_future_weight
     if counterfactual_hist_adaptive_beta:
         if counterfactual_hist_half not in ("neg", "pos"):
@@ -1232,6 +1273,10 @@ def compute_self_distillation_loss(
         )
     counterfactual_target_tv_per_token = None
     sup_frac_u_pos_per_token = None
+    cf_u_abs_mean_per_token = cf_u_frac_pos_per_token = None
+    cf_u_p90 = None
+    teacher_student_kl_per_token = teacher_tail_mass_per_token = None
+    target_tail_mass_per_token = target_argmax_tail_frac_per_token = None
     floor_clamped_frac_per_token = None
     tanh_compressed_frac_per_token = None
     target_max_prob_per_token = None
@@ -1391,13 +1436,40 @@ def compute_self_distillation_loss(
             teacher_null_distill_log_probs = teacher_null_all_log_probs
 
         if counterfactual_null_mode is not None:
+            if _ref_student:
+                # Candidate S: the reference is the student's OWN distribution on the same
+                # support (already add_tail'ed / renormalised above), detached so that no
+                # gradient flows through the target. Not an in-place op on the student tensor.
+                with torch.no_grad():
+                    teacher_null_distill_log_probs = student_distill_log_probs.detach()
             if teacher_null_distill_log_probs is None:
                 raise ValueError(
                     "Visual-counterfactual target reconstruction requires null-teacher log probabilities."
                 )
             # Configurable residual extrapolation in log-probability space:
-            # q = softmax(log p_real + beta * (log p_real - log p_null)).
+            # q = softmax(log p_real + beta * (log p_real - log p_ref)).
             u_term = teacher_real_distill_log_probs - teacher_null_distill_log_probs
+            if not torch.isfinite(u_term[loss_mask > 0]).all():
+                raise FloatingPointError(
+                    "non-finite u = log p_real - log p_ref on a valid position "
+                    f"(reference={counterfactual_reference}); refusing to silently reshape the target"
+                )
+            with torch.no_grad():
+                # Reference-agnostic diagnostics (candidate S plan §15): how far the reference is
+                # from the teacher, and how much teacher mass sits outside the student's top-k.
+                _u_abs = u_term.abs()
+                cf_u_abs_mean_per_token = _u_abs.mean(dim=-1)
+                cf_u_frac_pos_per_token = (u_term > 0).float().mean(dim=-1)
+                _u_valid = _u_abs[loss_mask > 0]
+                cf_u_p90 = _u_valid.float().quantile(0.9).item() if _u_valid.numel() else 0.0
+                del _u_valid
+                _p_real = teacher_real_distill_log_probs.exp()
+                teacher_student_kl_per_token = (
+                    _p_real * (teacher_real_distill_log_probs - student_distill_log_probs.detach())
+                ).sum(dim=-1)
+                if use_topk and self_distillation_config.distillation_add_tail:
+                    teacher_tail_mass_per_token = _p_real[..., -1]
+                del _p_real
             if counterfactual_st_enable:
                 # ST (selective suppression + conserved transfer), replaces the tilt:
                 # donors D = {u < -tau} ∩ Head(a; rho) ∩ Head(s; rho) lose
@@ -1504,7 +1576,7 @@ def compute_self_distillation_loss(
                 teacher_distill_log_probs = F.log_softmax(
                     teacher_real_distill_log_probs + _tilt,
                     dim=-1,
-                )
+                ).detach()  # the target is a constant for the student (value-identical for the null path)
             if counterfactual_target_gamma != 1.0 and counterfactual_st_enable:
                 raise ValueError(
                     "counterfactual_target_gamma is incompatible with counterfactual_st_enable "
@@ -1561,6 +1633,12 @@ def compute_self_distillation_loss(
                 target_entropy_per_token = -(
                     q_prob * teacher_distill_log_probs.clamp(min=-1e30)
                 ).sum(dim=-1)
+                if use_topk and self_distillation_config.distillation_add_tail:
+                    # tail = the collective mass outside the explicit top-k set, not a token
+                    target_tail_mass_per_token = q_prob[..., -1]
+                    target_argmax_tail_frac_per_token = (
+                        q_prob.argmax(dim=-1) == q_prob.shape[-1] - 1
+                    ).float()
             counterfactual_target_tv_per_token = 0.5 * (
                 q_prob - teacher_real_distill_log_probs.exp()
             ).abs().sum(dim=-1)
@@ -1636,6 +1714,21 @@ def compute_self_distillation_loss(
         metrics["self_distillation/counterfactual_target_tv"] = (
             verl_F.masked_sum(counterfactual_target_tv_per_token, loss_mask) / valid_token_count
         ).detach().item()
+    metrics["self_distillation/reference_is_student"] = float(_ref_student)
+    for _k, _t in (
+        ("counterfactual_u_abs_mean", cf_u_abs_mean_per_token),
+        ("counterfactual_u_frac_pos", cf_u_frac_pos_per_token),
+        ("teacher_student_kl", teacher_student_kl_per_token),
+        ("teacher_tail_mass", teacher_tail_mass_per_token),
+        ("target_tail_mass", target_tail_mass_per_token),
+        ("target_argmax_tail_frac", target_argmax_tail_frac_per_token),
+    ):
+        if _t is not None:
+            metrics[f"self_distillation/{_k}"] = (
+                verl_F.masked_sum(_t, loss_mask) / valid_token_count
+            ).detach().item()
+    if cf_u_p90 is not None:
+        metrics["self_distillation/counterfactual_u_p90"] = cf_u_p90
     if sup_frac_u_pos_per_token is not None:
         metrics["self_distillation/sup_frac_u_pos"] = (
             verl_F.masked_sum(sup_frac_u_pos_per_token, loss_mask) / valid_token_count

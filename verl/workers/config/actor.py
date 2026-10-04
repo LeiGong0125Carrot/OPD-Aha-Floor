@@ -130,6 +130,9 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_hist_mode: str = "cumsum"  # "cumsum" | "mean" | "hf" (history-future residual)
     counterfactual_hist_kappa: float = 0.10
     counterfactual_hist_half: str = "neg"  # "neg" (suppression, C/Ahm/Ahf) | "pos" (X1 re-grounding)
+    # Reference for u = log p_real - log p_ref: "null" (matched visual-null teacher, OPD-Aha) or
+    # "student" (candidate S: the current student's own distribution, detached; NO null forward).
+    counterfactual_reference: str = "null"
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -283,6 +286,26 @@ class SelfDistillationConfig(BaseConfig):
                 )
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")
+        if self.counterfactual_reference not in ("null", "student"):
+            raise ValueError(
+                "self_distillation.counterfactual_reference must be 'null' or 'student', "
+                f"got {self.counterfactual_reference}"
+            )
+        if self.counterfactual_reference == "student":
+            if self.counterfactual_null_mode is None:
+                raise ValueError(
+                    "counterfactual_reference='student' requires counterfactual_null_mode (reconstruction gate)"
+                )
+            if self.distillation_topk is None:
+                raise ValueError("counterfactual_reference='student' requires distillation_topk (shared support)")
+            if (self.counterfactual_u_clip_pos or self.counterfactual_st_enable
+                    or self.counterfactual_floor_alpha > 0.0 or self.counterfactual_tanh_scale > 0.0
+                    or self.counterfactual_target_gamma != 1.0 or self.counterfactual_hist_adaptive_beta
+                    or self.counterfactual_future_weight or self.counterfactual_hist_shuffle):
+                raise ValueError(
+                    "counterfactual_reference='student' is mutually exclusive with u_clip_pos / st / floor / "
+                    "tanh / gamma!=1 / hist / future / hist_shuffle (candidate S, first round)"
+                )
         valid_teacher_model_source = ["legacy", "current", "fixed"]
         if self.teacher_model_source not in valid_teacher_model_source:
             raise ValueError(

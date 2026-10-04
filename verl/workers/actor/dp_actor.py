@@ -1050,7 +1050,21 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_null_topk_logps = None
                         teacher_null_log_prob = None
                         counterfactual_null_mode = self_distillation_cfg.get("counterfactual_null_mode", None)
-                        if counterfactual_null_mode is not None:
+                        # Candidate S (counterfactual_reference="student"): reconstruction stays on
+                        # (null_mode set) but the reference is the student's own distribution, so
+                        # the null forward is skipped END-TO-END here (ray_trainer also skips
+                        # building the null view). The loss re-checks that no null tensors arrive.
+                        counterfactual_reference = str(
+                            self_distillation_cfg.get("counterfactual_reference", "null") or "null"
+                        )
+                        _null_forward_ran = 0.0
+                        if counterfactual_null_mode is not None and counterfactual_reference == "null":
+                            if os.environ.get("VOPD_FORBID_NULL") == "1":
+                                raise RuntimeError(
+                                    "VOPD_FORBID_NULL=1: a teacher-null forward was requested "
+                                    "(this run must be null-free)."
+                                )
+                            _null_forward_ran = 1.0
                             if "teacher_null_multi_modal_inputs" not in model_inputs:
                                 raise ValueError(
                                     "Visual-counterfactual target reconstruction requires "
@@ -1137,6 +1151,9 @@ class DataParallelPPOActor(BasePPOActor):
                         stage_wall_time_totals["timing_s/update_actor/loss_compute"] += loss_compute_time
 
                         vopd_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0
+                        # fraction of micro-batches that ran a teacher-null forward (metrics are mean-reduced);
+                        # must be exactly 0.0 under counterfactual_reference="student"
+                        vopd_metrics["self_distillation/teacher_null_forward_frac"] = _null_forward_ran
                         micro_batch_metrics.update(vopd_metrics)
 
                         if policy_fallback_mask is not None and policy_fallback_mask.any().item():
