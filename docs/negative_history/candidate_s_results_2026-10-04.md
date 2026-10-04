@@ -119,6 +119,19 @@
 
 ---
 
+## 5.1 候选 (a) S-tail 第 1 次结果（10-04 17:15 出分；Str2 训练中）
+
+实现：`counterfactual_reference_tail_u_zero=True`（OPD-Aha-Floor:sup `b71a3d8`），其余与 S 完全相同。观测字段为 `ca3245b` 之后的计数式指标（全局 token 加权）。
+
+| | step30 | step40 | step50 | 峰值 | 初期口径 |
+|---|---|---|---|---|---|
+| TB | 46.42 | 48.64 | 48.15 | 48.64 | ✗ |
+| V\* | 87.43 | 87.96 | 87.43 | 87.96 | ✗（V0 区间） |
+
+机制读数（51 步均值，计数式）：`target_tail_top1_frac` **0.0002**（S 的 tail 病理已消除）、`target_tail_mass` 0.0007、`target_top1_prob` 全局均值约 0.83、`teacher_student_kl` 0.137、`target_tv` 0.289。
+
+**读法**：去掉尾部病理后，TB 与 V\* 与 S 几乎相同（S r1 48.40 / 87.96）。这把 §4 中"尾部 / 极端比值是主因"的假设基本排除：**S 家族的 V\* 回到 V0 水平不是数值病理造成的，而是学生参照本身不携带 crop 增量信号**——与论文方法节的论点（§4.1）一致。待 Str2（约 22:00）齐后正式判定。
+
 ## 6. 来源
 
 - 代码：OPD-Aha-Floor:sup `df44663`（S 实现 + 测试 + launcher `scripts/train_pair_sref.sh`）。
