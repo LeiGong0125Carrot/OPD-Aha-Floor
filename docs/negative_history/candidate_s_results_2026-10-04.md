@@ -230,6 +230,20 @@ S 使用指数外推，所以师生 KL 下降并不保证 target 已接近 teach
 
 **复核总结**：S 首轮失败是直接实验事实；max 名称驱动的诊断聚合问题可在源码中定位；“普遍接近 one-hot”“约 7% 位置 tail 最大”及“null 反事实不可替代”的强解释暂不成立。先澄清观测，再决定修尾部、换参照或研究计算复用。
 
+### 7.6.1 观测修订已实施（2026-10-04 12:05，OPD-Aha-Floor:sup `ca3245b`）
+
+按 §7.6 的 1–3 条修改了 `compute_self_distillation_loss()` 的指标输出；不改任何训练数学，`reference=null` 路径的 loss / 梯度 / 既有均值指标与 `bea75c6` 仍 bit-identical（`scripts/test_sref.py` 第 9 组）。
+
+| 原字段 | 现字段 | 聚合含义 |
+|---|---|---|
+| `target_max_prob`（名含 max → 被 np.max） | `target_top1_prob_sum` + `target_stat_count`；`target_top1_prob`（等权 micro-batch 均值，数值与旧字段的 micro-batch 内均值逐比特相同）；`target_top1_prob_worst_mb`（显式 `Metric(MAX)`） | mean(sum)/mean(count) = token 加权全局均值；worst_mb 单独命名 |
+| `target_argmax_tail_frac`（"argmax" 含 max → 被 np.max） | `target_tail_top1_sum` + `target_stat_count`；`target_tail_top1_frac`（等权均值） | 同上 |
+| `target_entropy`、`target_tail_mass`（本来就是 mean） | 保留，另加 `_sum` | 可按计数重算 token 加权值 |
+
+测试（`test_sref.py` 第 10 组）：loss 函数输出的所有普通字段名不含 `max`/`min` 子串；`append_to_dict → reduce_metrics` 管道上复现 §7.2 的例子（`[0,0,0.02,0.08]` → 计数聚合 2.5%，旧命名 8%，显式 MAX 8%）；不等长 micro-batch 下计数聚合 = token 加权 0.5%、等权均值 5% 两者区分；生产 sum/count 与逐位置手算一致。
+
+未做的事：跨 dp worker 的汇总仍是 ray_trainer 既有路径（各 worker 等权），worker 间 micro-batch 数相同时 mean(sum)/mean(count) 仍等于全局值；§7.6 第 4 条——旧日志（含 S r1/Sr2、A、Ahf 的 `target_max_prob`）只有 max 后标量，不可恢复，文中一律按"最坏 micro-batch 包络"读。此次修订发生在 Sr2 训练之后，Sr2 日志仍是旧字段。
+
 ### 7.7 本节来源（固定提交，不随分支漂移）
 
 - [R1：本次原始结果记录，ae1d592][R1]。测试通过、速度、judge 分数与训练读数均引用这份报告，本次未独立重跑。
