@@ -5,6 +5,9 @@
 > 设计与实施计划：`candidate_s_null_free_implementation_plan.md`（v0.1）；代码：OPD-Aha-Floor:sup `df44663`。
 > **状态**：S r1 已出齐；Sr2 评测中（约 12:40 出齐），本文判定标注"待两次齐"。
 
+> **2026-10-04 复核提示**：原始实验数值及 §1–§6 记录保留；`target_max_prob` / `target_argmax_tail_frac` 的聚合口径存在源码可定位的问题，不能直接作全局均值／位置比例解释。结果与诊断的限定见 [§7 复核补充](#s-metric-review)。本次仅更新文档，未修复代码或新增实验。
+
+
 ---
 
 ## 1. 实现回顾
@@ -91,7 +94,7 @@ TB step30 规则分 49.38（judge 待出）；其余约 12:40 出齐。本文不
 ## 5. 后续候选（不自动开跑，等决定）
 
 | 候选 | 内容 | 预期 | 成本 |
-|---|---|---|---|
+|---|---|---|---|---|
 | (a) 修尾部病理再试 S | 参照只在学生的显式 top-100 上定义，tail 桶 u=0 | 去掉一个数值病理；但 V\* 崩到 V0 更像信号丢失而非数值问题，救回 V\* 的把握不大 | 小改 + 2 次训练 |
 | (b) 文本先验参照 | 教师只看文字（无图）的一次前向作参照，约 1/10 null 成本 | 仍是反事实，V\* 可能守住；TB 有"全图信息被当作视觉支持一起放大"的稀释风险（§7.5） | 需改 null 前向的 prompt 构造 + 2 次训练 |
 | (c) 前缀共享 | 复用全图 KV，null 分支只算 crop/文本/回答 | 量与 A 完全相同，应复现 A；省约 90% null 成本；是工程改进不是方法 novelty | 中等工程量 |
@@ -106,3 +109,135 @@ TB step30 规则分 49.38（judge 待出）；其余约 12:40 出齐。本文不
 - 日志：`Vision-OPD-setup/logs/train_S.log`、`train_Sr2.log`、`train_Ssmoke.log`、`train_Anullchk.log`、`eval_S.log`、`vjudge_S.log`。
 - 逐题：`eval/judge/treebench/pair_s_6karma-step{30,40,50}-priv-none-nothink_answer.jsonl`、`eval/judge/vstar/S-step{30,40,50}_seed42_answer.jsonl`。
 - 前序：`summary_history_future_on_full_aha_2026-10-03.md` §7（去 null 讨论）、`candidate_s_null_free_implementation_plan.md`。
+
+---
+
+<a id="s-metric-review"></a>
+## 7. 复核补充：结果判定、指标聚合与诊断边界（2026-10-04）
+
+> **复核范围**：原始结果快照 [ae1d592][R1]；实现快照 `df4466353f8f010f82d84bbdb5eb7b7c353507dc`。本节依据该报告和源码复核整理，区分报告记录、源码确认与分析推论。不新增实验结果，不重跑训练或 judge，不修改任何训练代码。
+>
+> **阅读约定**：§1–§6 保留原记录，所有实验数值不变；其中对指标和机制的解释，须结合本节的限定阅读。本节没有把 Sr2 的规则分转换为 judge 结果，也不根据原排程推断 Sr2 已完成。
+
+### 7.1 结果仍然未达标，但性能相近不等于机制等价
+
+根据原报告，S r1 的 TB 峰值为 **48.40**、V\* 峰值为 **87.96**，分别低于 50.5 和 93.5；此判定不受下面的诊断指标问题影响。Sr2 在被复核的快照中仍待 judge 结果。[R1]
+
+S 的 V\* 落在 V0 所报 87.4–88.5 的数值范围，只能说明性能水平接近。原表 V0 使用 **hide**，S 使用 **pair**，且 target 定义不同；不能据此认定二者优化机制等价，或把两者作为完全匹配条件的消融。
+
+TB 的描述性变化仍保留：池化 47.90（A 为 49.22）；Attributes +9.2、Ordering −5.5、Spatial Containment −5.0、Comparison −3.8、OCR −2.9；A 稳对而 S 全错 11 题，反向 4 题。这些结果展示类别与逐题行为差异，但一个运行内多个 checkpoint 不是独立训练重复，不能直接转换为因果或显著性结论。[R1]
+
+报告的 145.6 s 与 Ahf 的 209.9 s 不能全部归因于删除 null。保留原文的限定：null 前向本身约 25.3 s，其余差异包含节点差异；本次没有新增速度测量。[R1]
+
+### 7.2 源码确认：两个名称含 max 的指标被再次取最大值
+
+**第一层：loss 函数计算 microbatch 内的有效位置均值。** 令
+
+$$
+m_t=\max_v q_t(v),\qquad a_t=\mathbf{1}[\arg\max_v q_t(v)=\mathrm{tail}].
+$$
+
+`compute_self_distillation_loss()` 对它们做 `masked_sum / valid_token_count`，随后用 `.detach().item()` 存为普通标量，字段分别是 `self_distillation/target_max_prob` 与 `self_distillation/target_argmax_tail_frac`。[C1]
+
+**第二层：actor 收集各 microbatch 的标量，再调用统一 reducer。** `update_policy()` 通过 `append_to_dict(metrics, micro_batch_metrics)` 收集列表；末尾对这些列表调用 `reduce_metrics(local_metrics_to_reduce)`。这两个字段不是显式指定聚合类型的 `Metric` 对象。[C2]
+
+**第三层：reducer 按字段名包含的子串选择 max/min/mean。** 对普通数值列表，`reduce_metrics()` 的实际分支为：[C3]
+
+```python
+elif "max" in key:
+    metrics[key] = np.max(val)
+elif "min" in key:
+    metrics[key] = np.min(val)
+else:
+    metrics[key] = np.mean(val)
+```
+
+| 字段（省略 self_distillation/） | loss 函数输出 | actor 本地列表汇总 |
+|---|---|---|
+| `target_max_prob` | 当前 microbatch 的平均最大类别概率 | **max**，名称含 `max` |
+| `target_argmax_tail_frac` | 当前 microbatch 的 tail-argmax 比例 | **max**，`argmax` 中也含 `max` |
+| `target_entropy` | 当前 microbatch 的平均熵 | mean |
+| `target_tail_mass` | 当前 microbatch 的平均 tail 质量 | mean |
+
+所以，本地更新结束时，前两个字段至少经过了 **“各 microbatch 内先平均，再在 microbatch 之间取最大值”**。后续跨卡、跨 step 的汇总不会自动补回被丢弃的分子与分母，不能把这种输出直接解释为全局有效位置均值或比例。
+
+**合成例子，不是实测修正值**：四个 microbatch 的有效位置数相同，tail-argmax 比例为 `[0, 0, 0.02, 0.08]`。整体比例应为 0.025（2.5%），当前名称规则输出 0.08（8%）。不能据此推算真实运行的正确比例，只能确认现有字段不具有所声称的全局比例含义。
+
+另一个边界：不含 `max` 的字段在此层取 microbatch 标量的算术平均；若各 microbatch 有效位置数不同，它也不自动等于全局 token 加权平均。这个问题应与上述 max 聚合问题分开处理。
+
+### 7.3 对 §3–§4 的读数和结论作明确限定
+
+| 原报告读数／解释 | 复核后的准确读法 |
+|---|---|
+| `target_max_prob ≈ 0.9995`，因而整体 target 几乎 one-hot | **不能作整体均值解释**。该值来自带 max 汇总的统计；按当前路径，说明存在很尖的 microbatch，不等于全部有效位置的平均最大概率约为 0.9995。 |
+| `target_argmax_tail_frac = 0.074`，因而约 7.4% 的训练位置以 tail 为最大类别 | **不能作全局位置比例解释**。tail 成为最大类别的现象存在，但总体发生率未由这个字段确定；报告中的跨 step 平均仍然是在平均已被 max 汇总的量。 |
+| `target_tail_mass = 0.008`、`target_entropy ≈ 0.45` 与上述值放在一起解释 | 指标汇总算子不同，不能把它们当作同一全局位置集合、同一权重下的联合统计来推断尾部占比或整体尖锐程度。数值保留，口径需统一。 |
+| “tail 目标学生无法跟随” | Student 可以学习 tail 集合的**总质量**；缺失的是集合内部逐 token 的明确目标，而不是完全没有可优化的梯度。 |
+| “不是实现错误” | 原报告的回归、独立参照、禁 null 和 smoke 检查支持已测试路径的正确性，但不能排除全部工程或观测问题；本次确实定位了诊断汇总口径问题。 |
+
+**影响范围**：上述问题发生在指标汇总与解释层，不是本次发现了 S 的 JSD/target 数学路径错误；也不直接改变原有梯度、checkpoint 或 benchmark judge 分数。本节没有修改 reducer，更没有声称修复后性能会提高。
+
+修订前，A/Ahf 的同名指标也应检查是否经过同一条 reducer 路径；若是，不能拿其 `target_max_prob` 当作已经校准的全局均值参照。
+
+### 7.4 为什么 KL 下降、log-ratio 差距仍可能较大？
+
+源码中的 `teacher_student_kl` 是在当前 top-k＋tail 压缩分布上的
+
+$$
+D_{\mathrm{KL}}(p_t^+\|p_t^S)
+=\sum_v p_t^+(v)\log\frac{p_t^+(v)}{p_t^S(v)},
+$$
+
+而 `counterfactual_u_abs_mean` 是在同一支持集上对
+
+$$
+\left|\log p_t^+(v)-\log p_t^S(v)\right|
+$$
+
+做**类别均匀平均**，不是按 teacher 概率加权。定义来自源码；以下是分析推论。[C1]
+
+两者同时呈现“KL 下降、均匀平均的绝对差距上升”并不矛盾：teacher 主要概率质量上的匹配可以改善，而低概率类别上的 log-ratio 仍较大。支持集本身也随 student 变化；仅凭跨 step 均值，不能定位是哪些固定 token 引起变化。
+
+S 使用指数外推，所以师生 KL 下降并不保证 target 已接近 teacher。报告中的 `target_tv` 从 0.429 到 0.304、末期仍约 0.30，与“target 尚未整体退回 teacher”的判断相容；但 `target_max_prob` 的聚合问题意味着，不能进一步直接声称所有位置都停在近 one-hot 状态。[R1]
+
+**结论**：自动退火是当师生分布接近时的条件性质，不是沿训练步数保证发生的过程。极端概率比是合理的失败假设，尚未由当前汇总读数单独完成因果验证。
+
+### 7.5 null-free 的失败边界与后续候选的含义
+
+原报告支持的直接结论是：**最简 S 在当前配置下的首轮没有保住 A 的效果，尤其是 V\*。** 它不证明任意 null-free 方法都不可能成功，也不把本次下降唯一归因于 crop 增量丢失。参照语义变化、外推强度、尾部近似和优化过程仍可能共同作用。
+
+输出长度从所列 step1 的 146 变成 step51 的 85，是报告的观察；仅凭这两个读数，不能证明生成塌缩或“target 过尖导致缩短”。保留“格式／截断率尚未核对”的原状态。[R1]
+
+原 §5 的候选继续列为**未决、未验证，不自动开跑**：
+
+| 候选 | 可以回答的问题 | 本次复核的限定 |
+|---|---|---|
+| tail 的 `u=0` | 去掉聚合 tail 的额外指数放大后，S 是否改善？ | 不保证全局归一化后的 tail 概率不变，也不解决显式低概率 token 的极端比值；不是恢复原 null 视觉差分。 |
+| 文本先验参照 | 更便宜的文本参照能否提供有效监督？ | 仍需一次无图参照计算，不能等同于完全没有信息移除对照；成本约 1/10 与性能预期都待实测。 |
+| 前缀共享 | 保留原对比时，能复用多少计算？ | 仍依赖 visual-null；约 90% 的 null 成本节省是候选预期，不是本次实验结果。 |
+
+在这三条之间作机制驱动的选择之前，应先澄清指标口径。性能未达标已经成立，但“尾部问题占多大比例、是否是主要失败原因”尚未闭合。
+
+### 7.6 建议的观测修订与验收（尚未实施）
+
+本次只记录复核意见，不修改训练代码。后续若修订观测，建议优先修正聚合定义，而不是立即新增算法臂：
+
+1. **以分子／分母计数定义全局指标**。对有效位置 mask 为 M 的原始 target，记录 `sum(M * max(q))`、`sum(M * 1[argmax(q)=tail])`、`sum(M * q_tail)`、`sum(M * H(q))` 及共同的 `sum(M)`。在 microbatch 与数据并行样本维正确汇总后，再除以有效位置总数；不能重复统计并行复制的同一位置。
+2. **不要只给字段改名或只用等权 MEAN 替代 max**。这能避开名字匹配，但不同 microbatch 长度下仍可能不是 token 加权均值。需要保留计数；如需最坏 microbatch 指标，单独明确命名并记录，不能与全局平均混用。
+3. **端到端验证指标管道**。除 loss 层测试外，覆盖 `append_to_dict → reduce_metrics → 最终记录`：上面等长度例子应得到 2.5% 的全局比例，最坏 microbatch 为 8%；再加有效长度不等和 padding 的例子，核对带计数结果。仅在 loss 层断言字段正确，检测不到本次发现的后处理问题。
+4. **区分可恢复与不可恢复的数据**。若已保存逐位置或逐 microbatch 的原始值及计数，可重新汇总；若旧日志只保存 max 汇总后的标量，不能无损恢复历史全局均值／比例。不能补写估计值冒充实测值。
+5. **保持实验状态边界**。等待并记录 Sr2 的真实 judge 结果；不把旧预计出分时间当作完成证据，不自动启动 tail 修正、文本参照或前缀共享训练。本节没有执行 GPU、分布式测试或重算原始训练日志。
+
+**复核总结**：S 首轮失败是直接实验事实；max 名称驱动的诊断聚合问题可在源码中定位；“普遍接近 one-hot”“约 7% 位置 tail 最大”及“null 反事实不可替代”的强解释暂不成立。先澄清观测，再决定修尾部、换参照或研究计算复用。
+
+### 7.7 本节来源（固定提交，不随分支漂移）
+
+- [R1：本次原始结果记录，ae1d592][R1]。测试通过、速度、judge 分数与训练读数均引用这份报告，本次未独立重跑。
+- [C1：core_algos.py，df44663][C1]，`compute_self_distillation_loss()`：student-reference、KL/u 诊断定义、逐位置 target 统计及 microbatch 标量输出。
+- [C2：dp_actor.py，df44663][C2]，`update_policy()`：收集 microbatch 指标，末尾调用 `reduce_metrics()`；同文件还包含 null 前向守卫。
+- [C3：metric/utils.py，df44663][C3]，`reduce_metrics()`：普通列表按名称中 `max`／`min` 子串分派聚合；`Metric` 对象另走显式聚合分支。
+
+[R1]: https://github.com/LeiGong0125Carrot/OPD-Aha-Floor/blob/ae1d592d0939f7459ba62774a870a45b1722b733/docs/negative_history/candidate_s_results_2026-10-04.md
+[C1]: https://github.com/LeiGong0125Carrot/OPD-Aha-Floor/blob/df4466353f8f010f82d84bbdb5eb7b7c353507dc/verl/trainer/ppo/core_algos.py
+[C2]: https://github.com/LeiGong0125Carrot/OPD-Aha-Floor/blob/df4466353f8f010f82d84bbdb5eb7b7c353507dc/verl/workers/actor/dp_actor.py
+[C3]: https://github.com/LeiGong0125Carrot/OPD-Aha-Floor/blob/df4466353f8f010f82d84bbdb5eb7b7c353507dc/verl/utils/metric/utils.py
