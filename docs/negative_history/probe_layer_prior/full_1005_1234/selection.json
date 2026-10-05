@@ -1,0 +1,12 @@
+{
+ "passing": [],
+ "locked": null,
+ "best_by_d_regardless_of_gates": "final_32",
+ "locked_at": "2026-10-05T13:05:14",
+ "w_sha1": "64e23c45cc68f89cceb9b08d15c18c764e1afc99",
+ "tie_break": "min token-mean d on selection; then final < own < global_w; then lower layer",
+ "answer_tokens_selection": 97,
+ "active_degenerate": false,
+ "selection_judge": {},
+ "verdict": "no_candidate_passed_selection"
+}

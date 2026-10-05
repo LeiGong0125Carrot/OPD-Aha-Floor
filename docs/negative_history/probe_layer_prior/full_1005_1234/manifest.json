@@ -1,0 +1,77 @@
+{
+ "args": {
+  "model": "Qwen/Qwen3.5-4B",
+  "parquet": "/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet",
+  "chat_template": "/sfs/weka/scratch/nkw3mr/Vision-OPD/OPD-Aha-sup/scripts/../chat_templates/perception_chat_template_qwen35.jinja",
+  "out": "eval/probe_layer_prior/full_1005_1234",
+  "n": 400,
+  "sizes": "200,100,100",
+  "seed": 42,
+  "limit": 0,
+  "topk": 100,
+  "beta": 4.0,
+  "tau": 1.0,
+  "max_new_tokens": 1024,
+  "max_prompt_len": 10240,
+  "image_patch_size": 14,
+  "ir_a": 12,
+  "ir_b": 20,
+  "ir_lambda": 4.0,
+  "attn": "sdpa",
+  "recon_tol": 0.02,
+  "max_consecutive_errors": 10,
+  "n_boot": 1000
+ },
+ "commit": "fcdf7e76d256c7abf19bdb9e947841f0238bf97a",
+ "model": "Qwen/Qwen3.5-4B",
+ "model_commit_hash": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+ "L": 32,
+ "torch": "2.10.0+cu128",
+ "python": "3.12.14",
+ "cuda": "12.8",
+ "float32_matmul_precision": "highest",
+ "parquet": {
+  "path": "/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet",
+  "sha1": "4d7bcb4d5ad1081d194ed6dc932a10b55fdbcb79",
+  "rows": 400,
+  "mtime": 1789006191.3724086
+ },
+ "generation_config": {
+  "do_sample": null,
+  "temperature": null,
+  "top_k": null,
+  "top_p": null,
+  "pad_token_id": null,
+  "bos_token_id": null,
+  "eos_token_id": 248044
+ },
+ "thresholds": {
+  "m3_median_tv": 0.1,
+  "m3_corr": 0.7,
+  "m5_min_answer_tokens": 30
+ },
+ "tie_break": "min token-mean d on selection; then final < own < global_w; then lower layer",
+ "transformers": "5.5.0",
+ "device": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+ "chat_template_sha1": "6a927db830851a3ad406bf6d8e5a3c9e784aa5b0",
+ "eos_ids": [
+  248044,
+  248046
+ ],
+ "generation": "HF greedy, do_sample=False",
+ "split_sizes": {
+  "fit": 200,
+  "selection": 100,
+  "heldout": 100
+ },
+ "split_groups": {
+  "fit": 200,
+  "selection": 100,
+  "heldout": 100
+ },
+ "text_view": "student prompt with every <image> placeholder removed (leading newlines stripped); no extra hint",
+ "null_view": "teacher bbox_images with the LAST image replaced by its mean colour (null_scope=last)",
+ "student_view": "verl process_image(image_patch_size=14) on `images`; teacher views use raw RGB PIL like the trainer",
+ "positions": "logits at P-1..P+T-2 predict y_0..y_{T-1}; EOS included when generated",
+ "answer_rule": "(1) first <answer>..</answer> content; (2) leading option letter; (3) option letter starting the LAST non-empty line; else missing"
+}
