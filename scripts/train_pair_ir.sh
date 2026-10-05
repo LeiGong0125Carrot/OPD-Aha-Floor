@@ -13,6 +13,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 IR_TAIL="${IR_TAIL:-full}"; IR_A="${IR_A:-12}"; IR_B="${IR_B:-20}"; IR_LAMBDA="${IR_LAMBDA:-1.0}"
 case "$IR_TAIL" in full) TAG=IRf;; aha) TAG=IRa;; *) echo "IR_TAIL must be full|aha"; exit 1;; esac
+# tag carries non-default λ / interval so runs never share a checkpoint dir (resume_mode=auto)
+[ "$IR_LAMBDA" != "1.0" ] && TAG="${TAG}l$(echo "$IR_LAMBDA" | tr -d '.')"
+[ "$IR_A$IR_B" != "1220" ] && TAG="${TAG}b${IR_A}_${IR_B}"
 
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${TAG}${RUN_SUFFIX:-}_6karmA}"
