@@ -1097,6 +1097,8 @@ def compute_self_distillation_loss(
     teacher_null_all_log_probs: Optional[torch.Tensor] = None,
     teacher_null_topk_log_probs: Optional[torch.Tensor] = None,
     teacher_null_log_probs: Optional[torch.Tensor] = None,
+    teacher_internal_target_log_probs: Optional[torch.Tensor] = None,
+    teacher_internal_r_topk: Optional[torch.Tensor] = None,
     self_distillation_mask: Optional[torch.Tensor] = None,
     loss_agg_mode: str = "token-mean",
     rollout_is_weights: Optional[torch.Tensor] = None,
@@ -1200,6 +1202,47 @@ def compute_self_distillation_loss(
     counterfactual_hist_half = str(
         getattr(self_distillation_config, "counterfactual_hist_half", "neg") or "neg"
     )
+    # ---- Route 1: internal residual target (single frozen-teacher forward) ----
+    teacher_target_mode = str(getattr(self_distillation_config, "teacher_target_mode", "legacy") or "legacy")
+    if teacher_target_mode not in ("legacy", "internal_residual"):
+        raise ValueError(f"teacher_target_mode must be 'legacy' or 'internal_residual', got {teacher_target_mode!r}")
+    _internal = teacher_target_mode == "internal_residual"
+    _ti = getattr(self_distillation_config, "teacher_internal", None)
+    def _tiget(k, d=None):
+        if _ti is None:
+            return d
+        v = _ti.get(k, d) if hasattr(_ti, "get") else getattr(_ti, k, d)
+        return d if v is None else v
+    internal_lambda = _tiget("strength")
+    internal_tail = str(_tiget("tail_policy", "full"))
+    if _internal:
+        # Runtime guards. (The dataclass __post_init__ DOES run at worker start-up via
+        # omega_conf_to_dataclass -- reviewer-verified 10-05 -- but the loss is also called from
+        # tests and probes with plain dicts, so the guards are repeated here.)
+        if internal_lambda is None or not math.isfinite(float(internal_lambda)) or float(internal_lambda) < 0.0:
+            raise ValueError(f"internal_residual: teacher_internal.strength must be set, finite and >= 0, got {internal_lambda!r}")
+        internal_lambda = float(internal_lambda)
+        if internal_tail not in ("full", "aha"):
+            raise ValueError(f"internal_residual: tail_policy must be 'full' or 'aha', got {internal_tail!r}")
+        if counterfactual_null_mode is not None or counterfactual_reference != "null":
+            raise ValueError("internal_residual is null-free and student-free: counterfactual_null_mode must be None "
+                             "and counterfactual_reference must be 'null' (the legacy placeholder)")
+        if (counterfactual_u_clip_pos or counterfactual_st_enable or counterfactual_floor_alpha > 0.0
+                or counterfactual_tanh_scale > 0.0 or counterfactual_target_gamma != 1.0
+                or counterfactual_hist_adaptive_beta or counterfactual_future_weight or counterfactual_hist_shuffle):
+            raise ValueError("internal_residual is mutually exclusive with u_clip_pos / st / floor / tanh / gamma!=1 / "
+                             "hist / future / hist_shuffle (single-variable discipline)")
+        if (teacher_null_topk_log_probs is not None or teacher_null_all_log_probs is not None
+                or teacher_null_log_probs is not None):
+            raise ValueError("internal_residual: null-teacher tensors were passed although no null forward may run")
+        if not self_distillation_config.full_logit_distillation or getattr(self_distillation_config, "distillation_topk", None) is None \
+                or not bool(getattr(self_distillation_config, "distillation_add_tail", True)):
+            raise ValueError("internal_residual requires full_logit_distillation with a top-k support and distillation_add_tail=True")
+        if internal_tail == "full" and teacher_internal_target_log_probs is None:
+            raise ValueError("internal_residual(full): teacher_internal_target_log_probs [B,T,K+1] is required")
+        if teacher_internal_r_topk is None:
+            raise ValueError("internal_residual: teacher_internal_r_topk [B,T,K] is required")
+    internal_r_abs_per_token = internal_r_sq_per_token = None
     if counterfactual_reference not in ("null", "student", "teacher"):
         raise ValueError(
             f"counterfactual_reference must be 'null', 'student' or 'teacher', got {counterfactual_reference!r}"
@@ -1671,6 +1714,37 @@ def compute_self_distillation_loss(
                 q_prob - teacher_real_distill_log_probs.exp()
             ).abs().sum(dim=-1)
             del q_prob
+        elif _internal:
+            # Route 1: q ∝ p+ · exp(λ r). The target is a constant for the student (frozen teacher
+            # only; r read from the same forward that produced p+). Tail policies, plan §6:
+            #   full -> q already built on the full vocab and coarsened to K+tail in dp_actor;
+            #   aha  -> coarsen first (add_tail'ed p+), tilt only the explicit top-k, tail r := 0.
+            with torch.no_grad():
+                K = teacher_internal_r_topk.shape[-1]
+                if teacher_real_distill_log_probs.shape[-1] != K + 1:
+                    raise ValueError(f"internal_residual: support width {teacher_real_distill_log_probs.shape[-1]} != K+1={K+1}")
+                if internal_tail == "full":
+                    q_log = teacher_internal_target_log_probs.detach().float()
+                    if q_log.shape != teacher_real_distill_log_probs.shape:
+                        raise ValueError(f"internal_residual: target shape {tuple(q_log.shape)} != support {tuple(teacher_real_distill_log_probs.shape)}")
+                    _norm_err = torch.logsumexp(q_log[loss_mask > 0], dim=-1).abs().max().item() if (loss_mask > 0).any() else 0.0
+                    if not torch.isfinite(q_log[loss_mask > 0]).all() or _norm_err > 1e-3:
+                        raise FloatingPointError(f"internal_residual: target not finite/normalised (max |logsumexp| = {_norm_err:.3e})")
+                else:
+                    _tilt_k = internal_lambda * teacher_internal_r_topk.detach().float()
+                    _tilt = torch.cat([_tilt_k, torch.zeros_like(_tilt_k[..., :1])], dim=-1)
+                    q_log = F.log_softmax(teacher_real_distill_log_probs.float() + _tilt, dim=-1)
+                teacher_distill_log_probs = q_log.to(teacher_real_distill_log_probs.dtype).detach()
+                q_prob = teacher_distill_log_probs.exp()
+                target_max_prob_per_token = q_prob.amax(dim=-1)
+                target_entropy_per_token = -(q_prob * teacher_distill_log_probs.clamp(min=-1e30)).sum(dim=-1)
+                target_tail_mass_per_token = q_prob[..., -1]
+                target_argmax_tail_frac_per_token = (q_prob.argmax(dim=-1) == q_prob.shape[-1] - 1).float()
+                counterfactual_target_tv_per_token = 0.5 * (q_prob - teacher_real_distill_log_probs.exp()).abs().sum(dim=-1)
+                _r = teacher_internal_r_topk.detach().float()
+                internal_r_abs_per_token = _r.abs().mean(dim=-1)
+                internal_r_sq_per_token = (_r ** 2).mean(dim=-1)
+                del q_prob
         else:
             teacher_distill_log_probs = teacher_real_distill_log_probs
 
@@ -1744,6 +1818,14 @@ def compute_self_distillation_loss(
         ).detach().item()
     metrics["self_distillation/reference_is_student"] = float(_ref_student)
     metrics["self_distillation/reference_swap_sides"] = float(_swap_sides)
+    metrics["self_distillation/teacher_target_mode_internal"] = float(_internal)
+    if _internal:
+        metrics["self_distillation/internal_lambda"] = internal_lambda
+        metrics["self_distillation/internal_tail_is_full"] = float(internal_tail == "full")
+        for _k, _t in (("internal_r_abs", internal_r_abs_per_token), ("internal_r_sq", internal_r_sq_per_token)):
+            if _t is not None:
+                metrics[f"self_distillation/{_k}_sum"] = verl_F.masked_sum(_t, loss_mask).detach().item()
+                metrics[f"self_distillation/{_k}_mean"] = (verl_F.masked_sum(_t, loss_mask) / valid_token_count).detach().item()
     for _k, _t in (
         ("counterfactual_u_abs_mean", cf_u_abs_mean_per_token),
         ("counterfactual_u_frac_pos", cf_u_frac_pos_per_token),

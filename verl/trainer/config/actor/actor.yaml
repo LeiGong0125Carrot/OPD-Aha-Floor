@@ -163,6 +163,19 @@ self_distillation:
   # is forced to 0 so the aggregated tail mass is neither boosted nor suppressed by the tilt.
   counterfactual_reference_tail_u_zero: false
 
+  # Route 1: internal residual reconstruction from a SINGLE frozen-teacher forward (no null forward).
+  # "legacy" (default) leaves every existing path untouched. "internal_residual": q ∝ p+·exp(λ·r) with
+  # r = τ⁻¹·W_out·D_t·(h^b − h^a) for the block interval [start_block, end_block_exclusive) read through the
+  # teacher's own final RMSNorm scale and LM head. tail_policy: "full" = reconstruct on the full vocab then
+  # coarsen to top-k+tail; "aha" = coarsen first, tail r := 0 (declared variant). All three numbers must be
+  # set explicitly for a real run (no silent defaults; counterfactual_extrapolation_beta is NOT used here).
+  teacher_target_mode: legacy
+  teacher_internal:
+    start_block: null
+    end_block_exclusive: null
+    strength: null
+    tail_policy: full
+
   # Suppression-only tilt: clamp u = log p_real - log p_null at 0 from above,
   # i.e. q ∝ p_real * exp(beta * min(u, 0)). Only the negative half of the
   # visual contrast enters the target; false = official full tilt.

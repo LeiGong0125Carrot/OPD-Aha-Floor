@@ -135,6 +135,11 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_reference: str = "null"   # "null" | "student" (S) | "teacher" (S2: base=sg(p_S), ref=teacher view)
     # S-tail: with reference=student, define u only on the explicit top-k set (tail bucket u = 0).
     counterfactual_reference_tail_u_zero: bool = False
+    # Route 1 (internal residual): "legacy" keeps every existing target path bit-identical;
+    # "internal_residual" = q ∝ p+ · exp(λ·r), r = per-block-interval logit contribution read from the
+    # SAME frozen-teacher forward (no null forward). See docs/negative_history/teacher_internal_residual_reconstruction_plan.md
+    teacher_target_mode: str = "legacy"
+    teacher_internal: dict[str, Any] = field(default_factory=dict)
     teacher_prompt_mode: Optional[str] = None
     answer_hint_template: str = (
         "\n\nHere is a reference solution to this problem:\n"
@@ -288,6 +293,25 @@ class SelfDistillationConfig(BaseConfig):
                 )
         if self.counterfactual_null_mode is not None and not self.full_logit_distillation:
             raise ValueError("Visual-counterfactual target reconstruction requires full_logit_distillation=True.")
+        if self.teacher_target_mode not in ("legacy", "internal_residual"):
+            raise ValueError(
+                f"self_distillation.teacher_target_mode must be 'legacy' or 'internal_residual', got {self.teacher_target_mode}"
+            )
+        if self.teacher_target_mode == "internal_residual":
+            ti = self.teacher_internal or {}
+            for k in ("start_block", "end_block_exclusive", "strength"):
+                if ti.get(k) is None:
+                    raise ValueError(f"teacher_target_mode=internal_residual requires teacher_internal.{k} to be set explicitly")
+            if not (0 <= int(ti["start_block"]) < int(ti["end_block_exclusive"])):
+                raise ValueError("teacher_internal: need 0 <= start_block < end_block_exclusive")
+            if float(ti["strength"]) < 0:
+                raise ValueError("teacher_internal.strength must be >= 0")
+            if str(ti.get("tail_policy", "full")) not in ("full", "aha"):
+                raise ValueError("teacher_internal.tail_policy must be 'full' or 'aha'")
+            if self.counterfactual_null_mode is not None:
+                raise ValueError("internal_residual is null-free: set counterfactual_null_mode to null")
+            if self.distillation_topk is None or not self.distillation_add_tail:
+                raise ValueError("internal_residual requires distillation_topk and distillation_add_tail=True")
         if self.counterfactual_reference not in ("null", "student", "teacher"):
             raise ValueError(
                 "self_distillation.counterfactual_reference must be 'null', 'student' or 'teacher', "

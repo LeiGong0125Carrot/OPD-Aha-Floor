@@ -18,6 +18,7 @@ Single Process Actor
 """
 
 import logging
+import contextlib
 import os
 import time
 from types import SimpleNamespace
@@ -305,11 +306,15 @@ class DataParallelPPOActor(BasePPOActor):
         distill_topk: Optional[int] = None,
         topk_indices: Optional[torch.Tensor] = None,
         module: Optional[nn.Module] = None,
+        residual_capture=None,
+        internal_target_cfg: Optional[dict] = None,
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
             dict[str, torch.Tensor]:
                 log_probs: (bs, response_len)
+                if residual_capture is set (route 1, teacher only):
+                    internal_r_topk: (bs, response_len, k); internal_target_log_probs: (bs, response_len, k+1) [tail=full]
                 if calculate_entropy is True:
                     entropys: (bs, response_len)
                 if calculate_sum_pi_squared is False:
@@ -327,6 +332,13 @@ class DataParallelPPOActor(BasePPOActor):
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
         model = module or self.actor_module
+        internal_target_log_probs = internal_r_topk = None
+        if residual_capture is not None:
+            if not self.use_remove_padding or self.use_ulysses_sp or self.use_fused_kernels or topk_indices is None:
+                raise ValueError(
+                    "internal-residual capture is only implemented for the rmpad / SP=1 / non-fused teacher "
+                    "forward with the student's top-k indices supplied"
+                )
 
         # PrefixGrouper path for shared-prefix optimization
         if self.use_prefix_grouper:
@@ -455,14 +467,29 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
-                output = model(
-                    input_ids=input_ids_rmpad,
-                    attention_mask=None,
-                    position_ids=position_ids_rmpad,
-                    **multi_modal_inputs,
-                    use_cache=False,
-                    **extra_args,
-                )  # prevent model thinks we are generating
+                _packed_resp_mask = None
+                if residual_capture is not None:
+                    # positions that PREDICT y_t (P + t - 1), in the packed (rmpad) layout
+                    if response_start_idx is None:
+                        _rp = torch.arange(seqlen - response_length - 1, seqlen - 1, device=input_ids.device)
+                        _rp = _rp.unsqueeze(0).expand(batch_size, -1)
+                    else:
+                        _rp = self._build_response_positions(
+                            response_start_idx=response_start_idx, response_length=response_length, seqlen=seqlen
+                        )
+                    _full_mask = torch.zeros(batch_size, seqlen, dtype=torch.bool, device=input_ids.device)
+                    _full_mask[torch.arange(batch_size, device=input_ids.device).unsqueeze(1), _rp] = True
+                    _packed_resp_mask = _full_mask.reshape(-1)[indices]
+                    residual_capture.set_response_mask(_packed_resp_mask)
+                with (residual_capture if residual_capture is not None else contextlib.nullcontext()):
+                    output = model(
+                        input_ids=input_ids_rmpad,
+                        attention_mask=None,
+                        position_ids=position_ids_rmpad,
+                        **multi_modal_inputs,
+                        use_cache=False,
+                        **extra_args,
+                    )  # prevent model thinks we are generating
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -525,6 +552,32 @@ class DataParallelPPOActor(BasePPOActor):
                             topk_logits_rmpad = torch.gather(logits_rmpad, dim=-1, index=topk_indices_rmpad)
                         logsumexp_rmpad = torch.logsumexp(logits_rmpad, dim=-1, keepdim=True)
                         topk_logps_rmpad = topk_logits_rmpad - logsumexp_rmpad
+
+                        if residual_capture is not None:
+                            # Route 1: build the internal-residual target at the response positions.
+                            from verl.utils.teacher_residual import build_internal_targets
+
+                            residual_capture.check_single_forward()
+                            _r = residual_capture.r                                     # [n_resp, V] fp32, / tau
+                            _z = logits_rmpad[_packed_resp_mask].float()                 # already / temperature
+                            _tk = topk_indices_rmpad[_packed_resp_mask]                  # [n_resp, K]
+                            _it = build_internal_targets(
+                                _z, _r, float(internal_target_cfg["strength"]), _tk, str(internal_target_cfg["tail_policy"])
+                            )
+                            del _r, _z
+                            residual_capture.r = None
+
+                            def _restore(x):  # [n_resp, C] -> [bs, response_len, C]
+                                buf = torch.zeros(logits_rmpad.shape[0], x.shape[-1], dtype=x.dtype, device=x.device)
+                                buf[_packed_resp_mask] = x
+                                full = pad_input(hidden_states=buf, indices=indices, batch=batch_size, seqlen=seqlen)
+                                return self._select_response_positions(
+                                    full, response_length=response_length, response_start_idx=response_start_idx
+                                )
+
+                            internal_r_topk = _restore(_it["r_topk"])
+                            if "target_log_probs" in _it:
+                                internal_target_log_probs = _restore(_it["target_log_probs"])
 
                     # Compute sum_pi_squared if requested (for optimal_token_baseline)
                     if calculate_sum_pi_squared:
@@ -726,6 +779,10 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["topk_logps"] = topk_logps
                 if return_topk_indices:
                     outputs["topk_indices"] = topk_indices
+            if internal_r_topk is not None:
+                outputs["internal_r_topk"] = internal_r_topk
+            if internal_target_log_probs is not None:
+                outputs["internal_target_log_probs"] = internal_target_log_probs
             return outputs
 
     def _optimizer_step(self):
@@ -1030,6 +1087,23 @@ class DataParallelPPOActor(BasePPOActor):
                             self.teacher_module is None or self.teacher_module is self.actor_module
                         ):
                             raise ValueError("trust-region teacher requires a separate teacher_module in the actor worker.")
+                        # Route 1 (internal residual): capture block-interval contributions from THIS forward.
+                        teacher_target_mode = str(self_distillation_cfg.get("teacher_target_mode", "legacy") or "legacy")
+                        residual_capture = None
+                        internal_target_cfg = None
+                        if teacher_target_mode == "internal_residual":
+                            if self.teacher_module is None or self.teacher_module is self.actor_module:
+                                raise ValueError("internal_residual requires a separate FROZEN teacher_module (never the student).")
+                            if self_distillation_cfg.get("counterfactual_null_mode", None) is not None:
+                                raise ValueError("internal_residual is null-free: counterfactual_null_mode must be unset.")
+                            _ti = self_distillation_cfg.get("teacher_internal", None) or {}
+                            _a, _b, _lam = _ti.get("start_block"), _ti.get("end_block_exclusive"), _ti.get("strength")
+                            if _a is None or _b is None or _lam is None:
+                                raise ValueError("internal_residual: teacher_internal.{start_block,end_block_exclusive,strength} must be set.")
+                            from verl.utils.teacher_residual import ResidualCapture
+
+                            residual_capture = ResidualCapture(teacher_model, int(_a), int(_b), temperature)
+                            internal_target_cfg = {"strength": float(_lam), "tail_policy": str(_ti.get("tail_policy", "full") or "full")}
                         with torch.no_grad():
                             teacher_forward_start = time.perf_counter()
                             teacher_outputs = self._forward_micro_batch(
@@ -1040,12 +1114,35 @@ class DataParallelPPOActor(BasePPOActor):
                                 distill_topk=distill_topk,
                                 topk_indices=student_topk_indices,
                                 module=teacher_model,
+                                residual_capture=residual_capture,
+                                internal_target_cfg=internal_target_cfg,
                             )
+                            if residual_capture is not None and os.environ.get("VOPD_IR_VERIFY") == "1" \
+                                    and not getattr(self, "_ir_verified", False):
+                                # one-time real-model check: the read-only capture must not change the anchor
+                                _plain = self._forward_micro_batch(
+                                    teacher_inputs, temperature=temperature, calculate_entropy=False,
+                                    return_all_logps=return_all_logps, distill_topk=distill_topk,
+                                    topk_indices=student_topk_indices, module=teacher_model,
+                                )
+                                _same_lp = torch.equal(_plain["log_probs"], teacher_outputs["log_probs"])
+                                _same_tk = torch.equal(_plain["topk_logps"], teacher_outputs["topk_logps"])
+                                _close = torch.allclose(_plain["log_probs"].float(), teacher_outputs["log_probs"].float(), atol=0, rtol=1e-2) \
+                                    and torch.allclose(_plain["topk_logps"].float(), teacher_outputs["topk_logps"].float(), atol=0, rtol=1e-2)
+                                print(f"[IR verify] capture on/off teacher log_probs identical={_same_lp} topk_logps identical={_same_tk} "
+                                      f"close(rtol=1e-2)={_close}; hook calls={residual_capture.calls}", flush=True)
+                                if not _close:
+                                    raise RuntimeError("internal_residual: enabling the read-only capture changed the teacher anchor")
+                                if not (_same_lp and _same_tk):
+                                    print("[IR verify] WARNING: not bit-identical (kernel nondeterminism?) but within rtol=1e-2", flush=True)
+                                self._ir_verified = True
                             teacher_forward_time = time.perf_counter() - teacher_forward_start
                         stage_wall_time_totals["timing_s/update_actor/teacher_forward"] += teacher_forward_time
                         teacher_log_prob = teacher_outputs["log_probs"]
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
+                        teacher_internal_target = teacher_outputs.get("internal_target_log_probs")
+                        teacher_internal_r_topk = teacher_outputs.get("internal_r_topk")
                         teacher_null_all_logps = None
                         teacher_null_topk_logps = None
                         teacher_null_log_prob = None
@@ -1140,6 +1237,8 @@ class DataParallelPPOActor(BasePPOActor):
                             teacher_null_all_log_probs=teacher_null_all_logps,
                             teacher_null_topk_log_probs=teacher_null_topk_logps,
                             teacher_null_log_probs=teacher_null_log_prob,
+                            teacher_internal_target_log_probs=teacher_internal_target,
+                            teacher_internal_r_topk=teacher_internal_r_topk,
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,

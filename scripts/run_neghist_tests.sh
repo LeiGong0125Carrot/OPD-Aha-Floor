@@ -7,9 +7,11 @@ echo "========== test_neghist =========="
 CUDA_VISIBLE_DEVICES="" "$VOPD_PY" scripts/test_neghist.py; r1=$?
 echo "========== test_sref (candidate S) =========="
 CUDA_VISIBLE_DEVICES="" "$VOPD_PY" scripts/test_sref.py; r2=$?
+echo "========== test_internal_residual (route 1) =========="
+CUDA_VISIBLE_DEVICES="" "$VOPD_PY" scripts/test_internal_residual.py; r3=$?
 echo "========== 回归: sup/floor/tanh/gamma =========="
 for t in test_sup test_floor test_tanh test_gamma; do
   CUDA_VISIBLE_DEVICES="" "$VOPD_PY" scripts/$t.py > /tmp/$t.out 2>&1
   echo "$t: $(tail -1 /tmp/$t.out)"
 done
-exit $(( r1 | r2 ))
+exit $(( r1 | r2 | r3 ))
