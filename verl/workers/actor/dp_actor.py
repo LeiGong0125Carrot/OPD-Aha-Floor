@@ -962,6 +962,8 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys.append("teacher_multi_modal_inputs")
         if has_teacher_null_multi_modal_inputs:
             non_tensor_select_keys.append("teacher_null_multi_modal_inputs")
+        if self._has_non_empty_multi_modal_inputs(data.non_tensor_batch.get("teacher_null2_multi_modal_inputs")):
+            non_tensor_select_keys.append("teacher_null2_multi_modal_inputs")
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
 
@@ -988,6 +990,7 @@ class DataParallelPPOActor(BasePPOActor):
                 "timing_s/update_actor/student_forward": 0.0,
                 "timing_s/update_actor/teacher_forward": 0.0,
                 "timing_s/update_actor/teacher_null_forward": 0.0,
+                "timing_s/update_actor/teacher_null2_forward": 0.0,
                 "timing_s/update_actor/loss_compute": 0.0,
                 "timing_s/update_actor/backward": 0.0,
                 "timing_s/update_actor/optimizer_step": 0.0,
@@ -1198,6 +1201,34 @@ class DataParallelPPOActor(BasePPOActor):
                             # (c_t = relu(-(log p+ - log p0)) at the sampled token) -- exact,
                             # and immune to the sampled token falling outside the top-k support.
                             teacher_null_log_prob = teacher_null_outputs["log_probs"]
+                            # Arm Amis, num_views=2: second mismatched null, averaged in log space
+                            # (u = log p+ - mean_j log p0_j). Off by default; the single-view path above is untouched.
+                            _null_views = int(self_distillation_cfg.get("counterfactual_null_num_views", 1) or 1)
+                            if _null_views == 2:
+                                if "teacher_null2_multi_modal_inputs" not in model_inputs:
+                                    raise ValueError("counterfactual_null_num_views=2 requires teacher_null2_multi_modal_inputs.")
+                                from verl.utils.mismatch_null import average_null_log_probs
+                                teacher_null2_inputs = dict(teacher_inputs)
+                                teacher_null2_inputs["multi_modal_inputs"] = model_inputs["teacher_null2_multi_modal_inputs"]
+                                with torch.no_grad():
+                                    _t2 = time.perf_counter()
+                                    teacher_null2_outputs = self._forward_micro_batch(
+                                        teacher_null2_inputs,
+                                        temperature=temperature,
+                                        calculate_entropy=False,
+                                        return_all_logps=return_all_logps,
+                                        distill_topk=distill_topk,
+                                        topk_indices=student_topk_indices,
+                                        module=teacher_model,
+                                    )
+                                    stage_wall_time_totals["timing_s/update_actor/teacher_null2_forward"] += time.perf_counter() - _t2
+                                teacher_null_all_logps = average_null_log_probs(
+                                    teacher_null_all_logps, teacher_null2_outputs.get("all_logps") if return_all_logps else None
+                                )
+                                teacher_null_topk_logps = average_null_log_probs(
+                                    teacher_null_topk_logps, teacher_null2_outputs.get("topk_logps") if distill_topk else None
+                                )
+                                teacher_null_log_prob = average_null_log_probs(teacher_null_log_prob, teacher_null2_outputs["log_probs"])
                         if self_distillation_cfg.get("log_prob_dump_dir", None):
                             if distill_topk:
                                 student_distill_log_probs = student_topk_logps

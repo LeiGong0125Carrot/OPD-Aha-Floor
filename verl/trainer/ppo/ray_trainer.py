@@ -749,6 +749,17 @@ class RayPPOTrainer:
             null_images.append(Image.new("RGB", normalized.size, fill))
         return null_images
 
+    @staticmethod
+    def _mismatch_crop_teacher_images(teacher_images: list[Any], donor_crop: Any) -> list[Image.Image]:
+        # Arm Amis (null_scope=last): keep the full image, replace the crop by ANOTHER prompt's crop
+        # resized to the own crop's exact size (same image_grid_thw -> same prefix tensors).
+        if os.environ.get("VOPD_FORBID_NULL") == "1":
+            raise RuntimeError(
+                "VOPD_FORBID_NULL=1: the visual-null view was requested (this run must be null-free)."
+            )
+        from verl.utils.mismatch_null import mismatch_crop_images
+        return mismatch_crop_images(teacher_images, donor_crop, RayPPOTrainer._normalize_teacher_image)
+
     def _swap_images_in_messages(self, messages: list[dict], teacher_images: list[Any]) -> list[dict]:
         teacher_messages = deepcopy(messages)
         image_offset = 0
@@ -1302,10 +1313,35 @@ class RayPPOTrainer:
             counterfactual_null_mode = self_distillation_cfg.get("counterfactual_null_mode", None)
             # Candidate S: reference="student" -> no null view is built at all (the loss uses the
             # student's own distribution as the reference; dp_actor skips the null forward).
+            if counterfactual_null_mode not in (None, "mean_color", "mismatch_crop"):
+                raise ValueError(
+                    "self_distillation.counterfactual_null_mode must be None, 'mean_color' or 'mismatch_crop', "
+                    f"got {counterfactual_null_mode!r}"
+                )
             _build_null_view = (
-                counterfactual_null_mode == "mean_color"
+                counterfactual_null_mode in ("mean_color", "mismatch_crop")
                 and str(self_distillation_cfg.get("counterfactual_reference", "null") or "null") == "null"
             )
+            # Arm Amis: null view = [full image, crop of ANOTHER prompt in this batch] (verl/utils/mismatch_null.py).
+            _mismatch = _build_null_view and counterfactual_null_mode == "mismatch_crop"
+            null_num_views = int(self_distillation_cfg.get("counterfactual_null_num_views", 1) or 1)
+            if null_num_views not in (1, 2):
+                raise ValueError(f"self_distillation.counterfactual_null_num_views must be 1 or 2, got {null_num_views}")
+            if null_num_views == 2 and not _mismatch:
+                raise ValueError("self_distillation.counterfactual_null_num_views=2 requires counterfactual_null_mode='mismatch_crop'")
+            donor_idx_views = None
+            if _mismatch:
+                if str(self_distillation_cfg.get("counterfactual_null_scope", "all")) != "last":
+                    raise ValueError("counterfactual_null_mode='mismatch_crop' requires counterfactual_null_scope='last'")
+                if "uid" not in batch.non_tensor_batch:
+                    raise KeyError("counterfactual_null_mode='mismatch_crop' requires batch.non_tensor_batch['uid']")
+                from verl.utils.mismatch_null import pick_donor_indices
+                donor_idx_views = pick_donor_indices(
+                    list(batch.non_tensor_batch["uid"]),
+                    seed=int(self.config.data.get("seed", 0) or 0),
+                    step=int(getattr(self, "global_steps", 0) or 0),
+                    num_views=null_num_views,
+                )
             if teacher_image_key not in batch.non_tensor_batch:
                 raise KeyError(f"Teacher image key `{teacher_image_key}` not found in batch.non_tensor_batch")
             fallback_to_policy_loss = self_distillation_cfg.get("fallback_to_policy_loss_on_missing_teacher", False)
@@ -1316,7 +1352,9 @@ class RayPPOTrainer:
             teacher_response_start_idx_list = []
             teacher_multi_modal_inputs_list = []
             teacher_null_multi_modal_inputs_list = []
+            teacher_null2_multi_modal_inputs_list = []
             teacher_present_mask_list = []
+            _mismatch_unique_prompts = len(set(batch.non_tensor_batch["uid"].tolist())) if _mismatch else 0
 
             for i in range(batch_size):
                 self._raise_if_response_contains_visual_special_tokens(
@@ -1370,40 +1408,50 @@ class RayPPOTrainer:
                 teacher_multi_modal_inputs_list.append(teacher_multi_modal_inputs)
 
                 if _build_null_view:
-                    teacher_null_images = self._mean_color_teacher_images(
-                        teacher_images,
-                        null_scope=self_distillation_cfg.get("counterfactual_null_scope", "all"),
-                    )
-                    teacher_null_messages = self._prepare_teacher_messages(
-                        list(batch.non_tensor_batch["raw_prompt"][i]),
-                        teacher_null_images,
-                        teacher_prompt_messages=teacher_prompt_messages,
-                    )
-                    (
-                        teacher_null_input_ids,
-                        teacher_null_attention_mask,
-                        teacher_null_position_ids,
-                        teacher_null_response_start_idx,
-                        teacher_null_multi_modal_inputs,
-                    ) = self._build_teacher_prompt_inputs(
-                        teacher_null_messages,
-                        responses[i],
-                        response_mask[i],
-                        max_prompt_len=self_distillation_cfg.max_reprompt_len,
-                    )
-                    matched_prefix_tensors = (
-                        ("input_ids", teacher_input_ids, teacher_null_input_ids),
-                        ("attention_mask", teacher_attention_mask, teacher_null_attention_mask),
-                        ("position_ids", teacher_position_ids, teacher_null_position_ids),
-                        ("response_start_idx", teacher_response_start_idx, teacher_null_response_start_idx),
-                    )
-                    for tensor_name, real_tensor, null_tensor in matched_prefix_tensors:
-                        if not torch.equal(real_tensor, null_tensor):
-                            raise ValueError(
-                                "Mean-color counterfactual changed matched teacher prefix tensor "
-                                f"`{tensor_name}` for sample {i}."
+                    for view_k in range(null_num_views):
+                        if _mismatch:
+                            donor_i = int(donor_idx_views[view_k][i])
+                            donor_images = batch.non_tensor_batch[teacher_image_key][donor_i]
+                            donor_images = donor_images.tolist() if isinstance(donor_images, np.ndarray) else list(donor_images)
+                            teacher_null_images = self._mismatch_crop_teacher_images(teacher_images, donor_images[-1])
+                        else:
+                            teacher_null_images = self._mean_color_teacher_images(
+                                teacher_images,
+                                null_scope=self_distillation_cfg.get("counterfactual_null_scope", "all"),
                             )
-                    teacher_null_multi_modal_inputs_list.append(teacher_null_multi_modal_inputs)
+                        teacher_null_messages = self._prepare_teacher_messages(
+                            list(batch.non_tensor_batch["raw_prompt"][i]),
+                            teacher_null_images,
+                            teacher_prompt_messages=teacher_prompt_messages,
+                        )
+                        (
+                            teacher_null_input_ids,
+                            teacher_null_attention_mask,
+                            teacher_null_position_ids,
+                            teacher_null_response_start_idx,
+                            teacher_null_multi_modal_inputs,
+                        ) = self._build_teacher_prompt_inputs(
+                            teacher_null_messages,
+                            responses[i],
+                            response_mask[i],
+                            max_prompt_len=self_distillation_cfg.max_reprompt_len,
+                        )
+                        matched_prefix_tensors = (
+                            ("input_ids", teacher_input_ids, teacher_null_input_ids),
+                            ("attention_mask", teacher_attention_mask, teacher_null_attention_mask),
+                            ("position_ids", teacher_position_ids, teacher_null_position_ids),
+                            ("response_start_idx", teacher_response_start_idx, teacher_null_response_start_idx),
+                        )
+                        for tensor_name, real_tensor, null_tensor in matched_prefix_tensors:
+                            if not torch.equal(real_tensor, null_tensor):
+                                raise ValueError(
+                                    f"Visual-null view ({counterfactual_null_mode}, view {view_k}) changed matched teacher "
+                                    f"prefix tensor `{tensor_name}` for sample {i} (image token count must be identical)."
+                                )
+                        if view_k == 0:
+                            teacher_null_multi_modal_inputs_list.append(teacher_null_multi_modal_inputs)
+                        else:
+                            teacher_null2_multi_modal_inputs_list.append(teacher_null_multi_modal_inputs)
 
             teacher_input_ids = torch.nn.utils.rnn.pad_sequence(
                 teacher_input_ids_list,
@@ -1443,12 +1491,19 @@ class RayPPOTrainer:
                 "self_distillation/policy_fallback_fraction": (1.0 - teacher_present_mask.mean()).item(),
                 "self_distillation/grpo_fallback_count": grpo_fallback_count,
                 "self_distillation/counterfactual_mean_color_fraction": (
-                    teacher_present_mask.mean().item() if _build_null_view else 0.0
+                    teacher_present_mask.mean().item() if (_build_null_view and not _mismatch) else 0.0
                 ),
+                "self_distillation/counterfactual_mismatch_crop_fraction": (
+                    teacher_present_mask.mean().item() if _mismatch else 0.0
+                ),
+                "self_distillation/mismatch_unique_prompts": float(_mismatch_unique_prompts),
+                "self_distillation/null_num_views": float(null_num_views if _build_null_view else 0),
             }
             teacher_non_tensors = {"teacher_multi_modal_inputs": teacher_multi_modal_inputs_list}
             if _build_null_view:
                 teacher_non_tensors["teacher_null_multi_modal_inputs"] = teacher_null_multi_modal_inputs_list
+                if null_num_views == 2:
+                    teacher_non_tensors["teacher_null2_multi_modal_inputs"] = teacher_null2_multi_modal_inputs_list
             return DataProto.from_dict(
                 tensors={
                     "teacher_input_ids": teacher_input_ids,
@@ -2372,6 +2427,10 @@ class RayPPOTrainer:
                     for k in ("n_gpus_per_node", "nnodes", "total_training_steps", "save_freq")
                 },
                 "env": {k: os.environ.get(k) for k in ("VOPD_FORBID_NULL", "EXPERIMENT_NAME_OVERRIDE")},
+                "null_mode": sd_cfg.get("counterfactual_null_mode", None),
+                "null_scope": sd_cfg.get("counterfactual_null_scope", None),
+                "null_num_views": sd_cfg.get("counterfactual_null_num_views", 1),
+                "u_clip_pos": sd_cfg.get("counterfactual_u_clip_pos", False),
             }
             with open(os.path.join(out_dir, "sd_manifest.json"), "w") as f:
                 json.dump(manifest, f, indent=2, default=str, ensure_ascii=False)

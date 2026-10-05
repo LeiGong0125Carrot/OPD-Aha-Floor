@@ -143,7 +143,11 @@ self_distillation:
   teacher_image_key: null
 
   # Optional matched visual counterfactual. "mean_color" enables fixed one-unit target extrapolation.
+  # "mismatch_crop" (arm Amis): null view = [full image, crop of ANOTHER prompt in the batch] (requires null_scope=last).
   counterfactual_null_mode: null
+
+  # Arm Amis only: 1 = one mismatched null; 2 = two mismatched nulls averaged in log space.
+  counterfactual_null_num_views: 1
 
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0

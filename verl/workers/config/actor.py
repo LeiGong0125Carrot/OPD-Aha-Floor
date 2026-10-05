@@ -113,6 +113,9 @@ class SelfDistillationConfig(BaseConfig):
     counterfactual_null_mode: Optional[str] = None
     counterfactual_extrapolation_beta: float = 1.0
     counterfactual_null_scope: str = "all"
+    # Arm Amis: with counterfactual_null_mode="mismatch_crop" the null view is [full image, crop of another
+    # prompt in the batch]; num_views=2 averages two such nulls (log-space mean). See verl/utils/mismatch_null.py.
+    counterfactual_null_num_views: int = 1
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -184,11 +187,19 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.teacher_image_key is required when teacher_always_on=True "
                 "(unless teacher_prompt_mode='answer_hint')"
             )
-        if self.counterfactual_null_mode not in (None, "mean_color"):
+        if self.counterfactual_null_mode not in (None, "mean_color", "mismatch_crop"):
             raise ValueError(
-                "self_distillation.counterfactual_null_mode must be None or 'mean_color', "
+                "self_distillation.counterfactual_null_mode must be None, 'mean_color' or 'mismatch_crop', "
                 f"got {self.counterfactual_null_mode}"
             )
+        if self.counterfactual_null_num_views not in (1, 2):
+            raise ValueError(
+                f"self_distillation.counterfactual_null_num_views must be 1 or 2, got {self.counterfactual_null_num_views}"
+            )
+        if self.counterfactual_null_num_views == 2 and self.counterfactual_null_mode != "mismatch_crop":
+            raise ValueError("self_distillation.counterfactual_null_num_views=2 requires counterfactual_null_mode='mismatch_crop'")
+        if self.counterfactual_null_mode == "mismatch_crop" and self.counterfactual_null_scope != "last":
+            raise ValueError("self_distillation.counterfactual_null_mode='mismatch_crop' requires counterfactual_null_scope='last'")
         if self.counterfactual_extrapolation_beta < 0.0:
             raise ValueError(
                 "self_distillation.counterfactual_extrapolation_beta must be non-negative, "
