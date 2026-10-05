@@ -433,22 +433,65 @@ v0.1 的“单卡约1小时”是估计，不是测量。除400题的三种评�
 9. **聚合：** 不等长microbatch以sum/count形成token加权值；指标名含max/argmax不触发误聚合；分位数不靠平均局部中位数冒充全局值。
 10. **训练接入：** legacy A/IR/S等不被默认改变；internal_prior禁null/text、禁student anchor、拒绝缺失系数或错误归一化；同一prefix下目标可复现。
 
-## 6. 结果与判读记录（待实施后填写）
+## 6. 结果与判读记录（2026-10-05 13:05，400 题全量，run `full_1005_1234`）
 
-本版没有运行400题探针，没有得到新层排名、回归系数或训练结果。以下表格保持空白，不把原计划阈值当作实测数字。
+> 代码：sup `fcdf7e7`（`verl/utils/layer_prior_probe.py`、`scripts/probe_layer_prior.py`、`scripts/test_layer_prior_probe.py`，§5.6 第 1–9 项单测全过，第 10 项训练接入未实现）。汇总文件：`docs/negative_history/probe_layer_prior/full_1005_1234/`（metrics / selection / regression / per_layer / manifest / held-out post-hoc）；positions.npz、完整回答、hidden states 不入库。
+> 环境：Qwen3.5-4B（HF snapshot 851bf6e8…）、transformers 5.5.0、torch 2.10、bf16 + sdpa、单张 RTX Pro 6000（hold 20814117，与 IRfl2 评测共卡）；fp32 matmul 精度 `highest`。
 
-| 项目 | 待填写内容 |
+| 项目 | 实际 |
 |---|---|
-| 代码／模型／环境 | commit、模型revision、依赖、后端与设备 |
-| 实际数据 | 分组规则、fit/selection/held-out题数和token数、截断率 |
-| 选择结果 | prior族、层或固定w哈希、锁定依据 |
-| M1 | null/text距离与最终层基线 |
-| M2 | 全局R²与条件数，oracle如有则明确单列 |
-| M3/M4 | 总体／活动位置target-TV、相关性、两个基线与配对区间 |
-| M5 | 答案解析覆盖与子集结果，停止／格式统计 |
-| 计算成本 | 各forward、逐层投影、显存、完整离线成本 |
-| 决策 | 通过、未通过或证据不足；仅对已测候选下结论 |
-| 正式训练 | 另行授权后记录TB/V\*及在线null计数，不以探针替代 |
+| 数据 | `train_6karmA_pair.parquet`（sha1 见 manifest）seed 42 抽 400 题；原图全部唯一，分组退化为按题：fit 200 / selection 100 / held-out 100 |
+| 回答 | base 全图 HF 贪心，max 1024；截断 9/400；答案位可定位 384/400（末行"[Correct/Final] answer: **X**"360、行首字母 24），missing 11，unmappable 5 |
+| 位置数 | fit 29,395 / selection 13,368 / held-out 12,605；答案位 189 / 97 / 98；活跃位（a\* = fit 的 75% 分位 = 0.079）7,349 / 3,416 / 3,155 |
+| 重建核对 | ℓ=L 读出 vs 模型 bf16 logits：mean TV 0.003–0.005（断言阈 0.02），hook 各触发一次 |
+| 成本 | 1,834 s（生成 2.5 s + 四次评分 1.3 s + 逐层读出 0.7 s / 题），峰值显存 15.5 GB，0 异常 |
+| 参照尺度 | TV(P⁺,P⁰) token 均值 0.065（中位 0.017，75% 0.079，90% 0.19，95% 0.29）；TV(P⁺,P_text) 0.23–0.25；TV(P⁰,P_text) 0.23–0.24。**p⁰ 离 p⁺ 比离语言先验近 3.5 倍** |
+| 基线 | d_base = TV(P⁺,Q_A)：all 0.27–0.28（中位 0.12），active 0.56–0.57；d_IRfl4：all 0.42–0.43，active 0.70–0.71（比不纠正还远） |
+| **M1** | 无任何候选比 p⁺ 自己更接近 p⁰。final-D：ℓ≤20 TV 0.997（质量几乎全在 tail 桶，词表坐标下未成形），ℓ=24 0.98，28 0.84，30 0.69，31 0.36，32(=p⁺) 0.065；own-D 同形状（31 层 0.34）；活跃位上 31 层 0.52 vs p⁺ 0.21。对 p_text 的距离曲线同形状，没有一层比 p⁺（0.23）更像语言先验 |
+| **M2** | 全局 w（fit 29,395 位置，满秩，cond 4.6e3）：in-sample R²_corr = **0.008**，selection 0.007，held-out 0.007；32 个权重全在 ±0.2 内。真 u 与各 block 贡献的任何固定线性组合基本正交 |
+| **M3** | selection 上 d 的 token 均值最小者 = final_32 = 不纠正基线（0.274），global_w 0.275；所有逐层候选 ≥0.34，中位 ≥0.12；Corr_ω 全部在 −0.06…+0.09。无候选过 M3 |
+| **M4** | 无候选优于不纠正基线；全部优于 IRfl4 仅因 IRfl4 本身比不纠正更差 |
+| **M5** | 答案位 TV(P⁺,P⁰) 仅 0.012–0.021，d_base 中位 0.000：对 base 自己的贪心回答，crop 很少改变答案字母的分布；该子集上无候选过门槛（31 层 d 均值 0.64–0.68） |
+| 活跃位 | 所有候选 d 均值 0.65–0.85，全部劣于不纠正（0.56） |
+| held-out | 无锁定候选，未做确认；其余候选的 held-out 数字只写入 post-hoc 文件，未用于任何选择 |
+| **判定** | `no_candidate_passed_selection`：按 §4.2 末行，**结束对"单次 real 前向的线性读出族（逐层 final-D / own-D、全局 block 权重）"的投入**；不宣称所有单前向方法不可能 |
+
+### 6.1 两个样本（selection 集，逐 token）
+
+**样本 1，row 719**（"What color is the first letter on the top left of the sign?"，GT C），回答第 5 个 token，前文 "The sign on the" → 下一词。这是 selection 集里 crop 改变教师分布最大的位置：
+
+| 分布 | top 词（概率） |
+|---|---|
+| P⁺（看 crop） | left 0.98, far 0.01, top 0.008 |
+| P⁰（不看 crop） | **top 0.93**, left 0.04, far 0.03 |
+| P_text | tail 0.39, left 0.24, top 0.14 |
+| Q_A（β=4） | left 1.00 |
+| p_16 / p_24 读出 | tail 1.00 / tail 0.998（未成形） |
+| p_28 读出 | tail 0.71, left 0.27 |
+| p_30 / p_31 读出 | left 0.69 / **left 0.976**（≈ p⁺，不是 p⁰） |
+| global-w 先验 | left 0.98（≈ p⁺） |
+
+TV(P⁺,P⁰)=0.945。"不看 crop 的信念是 top"这件事在 real 前向的残差流里**任何一层都读不出来**：中层读出还没成形，晚层读出已经被 crop 证据覆盖成 left。p⁰ 不是本次计算的一个子部分，而是另一次计算的结果。
+
+**样本 2，row 1706**（"primary color of the building on the far left edge"，GT C），回答第 1 个 token：
+
+| 分布 | top 词（概率） |
+|---|---|
+| P⁺ | The 0.57, C 0.39 |
+| P⁰ | C 0.58, The 0.31 |
+| Q_A | **The 0.986**, C 0.012 |
+| p_31 读出 | C 0.84, " C" 0.06（top-1 像 p⁰，TV 仍 0.35） |
+| Q̂(p_31) | The 1.00（d=0.014，碰巧同向） |
+| global-w 先验 / Q̂ | The 0.60, C 0.36 / **C 0.51, The 0.45**（d=0.54，方向反了） |
+
+这一位上 A 的目标把"先解释再作答"从 0.57 推到 0.986——A 的 u 在首 token 上编码的是作答风格而非视觉证据。31 层读出在 top-1 上像 p⁰，但同题同层在其他位置（样本 1）又完全像 p⁺：像不像 p⁰ 不是层的属性，而是逐位置随机的，所以逐层候选的 Corr_ω 在全体位置上为零。
+
+### 6.2 结论
+
+1. 在 Qwen3.5-4B 的单次 pair 前向里，响应位置的残差流不保留"没有 crop 时会怎么想"的信息；晚层读出 ≈ p⁺，中早层读出在词表坐标下未成形，block 贡献的任何固定线性组合与真 u 正交（R² 0.008）。
+2. 这也解释了 IRfl4：它的目标离 Q_A 比不纠正更远（0.43 vs 0.27），放大 [12,20) 贡献放大的是与 u 正交的方向。
+3. p⁰ 离 p⁺ 很近（0.065）而离语言先验很远（0.23）：A 的 null 不是语言先验；"找内部的语言先验来替代 null"这一表述与 A 实际使用的参照不同，若要检验"语言先验参照经训练后是否也能到 A 的效果"，应直接用精确的语言先验（纯文本教师前向或 `null_scope=all`）做一次训练上界，而不是在内部找近似。
+4. 本轮排除的只是线性读出族；用户已明确排除 tuned lens / 新增解码头方向。
 
 ## 7. 风险与解释边界
 
