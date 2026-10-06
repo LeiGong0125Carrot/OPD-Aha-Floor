@@ -38,7 +38,7 @@ check("both rollouts of a prompt share the donor", all(d1[2 * k] == d1[2 * k + 1
 check("donor index points at the FIRST rollout of the donor prompt", all(int(d1[i]) % 2 == 0 for i in range(96)))
 d2a, d2b = pick_donor_indices(uids, seed=42, step=7, num_views=2)
 check("num_views=2: first view identical to the single-view draw", np.array_equal(d2a, d1))
-check("num_views=2: two donors differ from each other and from own", all(uids[int(d2a[i])] != uids[int(d2b[i])] != uids[i] for i in range(96)))
+check("num_views=2: two donors differ from each other and from own", all(uids[int(d2a[i])] != uids[int(d2b[i])] and uids[int(d2a[i])] != uids[i] and uids[int(d2b[i])] != uids[i] for i in range(96)))
 check("num_views=2 with 2 prompts raises", raises(lambda: pick_donor_indices(["a", "a", "b", "b"], 1, 1, num_views=2), ValueError))
 check("single prompt raises", raises(lambda: pick_donor_indices(["a", "a"], 1, 1), ValueError))
 check("num_views=3 raises", raises(lambda: pick_donor_indices(uids, 1, 1, num_views=3), ValueError))
@@ -109,6 +109,7 @@ try:
     check("gate accepts both null modes", 'in ("mean_color", "mismatch_crop")' in src)
     check("mismatch path reads uid + data seed + global_steps", "pick_donor_indices" in src and 'non_tensor_batch["uid"]' in src and "global_steps" in src)
     check("prefix-equality assertion still present for every view", "changed matched teacher" in src and "for view_k in range(null_num_views)" in src)
+    check("mismatch path refuses batches with a sample lacking teacher images (donor safety)", "requires teacher images for every sample" in src)
 except Exception as e:  # ray etc. not importable here
     if os.environ.get("PROBE_TEST_STRICT") == "1":
         check(f"trainer import ({type(e).__name__}: {e})", False)

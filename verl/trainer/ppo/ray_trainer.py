@@ -1327,7 +1327,7 @@ class RayPPOTrainer:
             null_num_views = int(self_distillation_cfg.get("counterfactual_null_num_views", 1) or 1)
             if null_num_views not in (1, 2):
                 raise ValueError(f"self_distillation.counterfactual_null_num_views must be 1 or 2, got {null_num_views}")
-            if null_num_views == 2 and not _mismatch:
+            if null_num_views == 2 and counterfactual_null_mode != "mismatch_crop":
                 raise ValueError("self_distillation.counterfactual_null_num_views=2 requires counterfactual_null_mode='mismatch_crop'")
             donor_idx_views = None
             if _mismatch:
@@ -1336,6 +1336,21 @@ class RayPPOTrainer:
                 if "uid" not in batch.non_tensor_batch:
                     raise KeyError("counterfactual_null_mode='mismatch_crop' requires batch.non_tensor_batch['uid']")
                 from verl.utils.mismatch_null import pick_donor_indices
+                # every sample must bring its own crop: a donor without teacher images cannot serve as a null view
+                # (the policy-loss fallback keeps A's semantics for the sample itself, but never for a donor)
+                if teacher_image_key not in batch.non_tensor_batch:
+                    raise KeyError(f"Teacher image key `{teacher_image_key}` not found in batch.non_tensor_batch")
+                _avail = [
+                    self._teacher_images_available(
+                        list(x) if not isinstance(x, np.ndarray) else x.tolist()
+                    ) if x is not None else False
+                    for x in batch.non_tensor_batch[teacher_image_key]
+                ]
+                if not all(_avail):
+                    raise ValueError(
+                        f"counterfactual_null_mode='mismatch_crop' requires teacher images for every sample "
+                        f"(missing for {sum(not a for a in _avail)} of {len(_avail)})"
+                    )
                 donor_idx_views = pick_donor_indices(
                     list(batch.non_tensor_batch["uid"]),
                     seed=int(self.config.data.get("seed", 0) or 0),
