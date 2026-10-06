@@ -33,6 +33,7 @@ from pprint import pprint
 from string import Template
 from typing import Any, Optional
 
+import math
 import numpy as np
 import ray
 import torch
@@ -1659,6 +1660,15 @@ class RayPPOTrainer:
             raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be null")
         if not self.async_rollout_mode:
             raise ValueError("PBD needs the agent-loop (async) rollout to generate crop-view continuations")
+        # mirror the dataclass checks at runtime (hydra DictConfig skips __post_init__; 14 §17)
+        r, c, lam = float(sd.get("pbd_ratio", 0.10)), float(sd.get("pbd_coverage", 1.0)), float(sd.get("pbd_lambda", 0.5))
+        if not (0.0 < r < 1.0): raise ValueError(f"pbd_ratio must be in (0,1), got {r}")
+        if not (0.0 < c <= 1.0): raise ValueError(f"pbd_coverage must be in (0,1], got {c}")
+        if lam < 0.0: raise ValueError("pbd_lambda must be >= 0")
+        if str(sd.get("pbd_mode", "keep")) not in ("keep", "replace"): raise ValueError("pbd_mode must be keep|replace")
+        if int(sd.get("pbd_max_cont_len", 256)) < 1: raise ValueError("pbd_max_cont_len must be >= 1")
+        if self.config.actor_rollout_ref.actor.get("use_dynamic_bsz", False): raise ValueError("PBD requires use_dynamic_bsz=False")
+        if int(self.config.actor_rollout_ref.actor.get("ppo_epochs", 1)) != 1: raise ValueError("PBD requires ppo_epochs=1")
         return sd
 
     def _maybe_append_pbd_branch_rows(self, batch: DataProto, timing_raw: dict) -> tuple[DataProto, dict]:
@@ -1734,6 +1744,9 @@ class RayPPOTrainer:
         branch = batch.select_idxs(np.array(cand))
         new = {k_: [] for k_ in ("responses", "input_ids", "attention_mask", "response_mask", "position_ids", "pbd_loss_mask", "pbd_t_star")}
         yT_len, trunc, leak_rows, leak_toks, n_toks = [], 0, 0, 0, 0
+        leak_rel, miss_b, miss_p, plen = [], 0, 0, []
+        dump_dir = os.environ.get("PBD_SMOKE_DUMP") or None
+        dump_rows = []
         mm_inputs = batch.non_tensor_batch.get("multi_modal_inputs", None)
         # self-check (review 2): the helper must reproduce the rollout's position ids on a parent row
         _i0 = cand[0]
@@ -1744,7 +1757,11 @@ class RayPPOTrainer:
         for j, i in enumerate(cand):
             flags = P.leak_token_mask(tok, conts[j]) if conts[j] else []
             leak_rows += int(any(flags)); leak_toks += int(sum(flags)); n_toks += len(conts[j])
+            leak_rel += P.leak_rel_positions(flags)
             yT_len.append(len(conts[j])); trunc += int(len(conts[j]) >= max_cont)
+            _p_ids = P.unpad_response(responses[i], resp_attn[i]); plen.append(len(_p_ids))
+            _p_txt = tok.decode(_p_ids); _c_txt = tok.decode(conts[j])
+            miss_p += int(P.missing_answer(_p_txt)); miss_b += int(P.missing_answer(tok.decode(prefixes[j]) + _c_txt))
             rowt = P.make_branch_row_tensors(batch.batch["prompts"][i], attn[i, :prompt_len], prefixes[j], conts[j], R, pad_id,
                                              flags if leak_mask_on else None)
             pos = P.compute_position_ids(self.processor, rowt["input_ids"].unsqueeze(0), rowt["attention_mask"].unsqueeze(0),
@@ -1758,6 +1775,18 @@ class RayPPOTrainer:
             # parent bookkeeping
             t_star[i] = len(prefixes[j])
             loss_mask[i] = P.parent_loss_mask(resp_attn[i], len(prefixes[j]), mode)
+            if dump_dir:
+                _n = int(rowt["pbd_n_resp"]); _gt = mm_inputs[i].get("image_grid_thw") if mm_inputs is not None else None
+                dump_rows.append(dict(
+                    uid=str(batch.non_tensor_batch["uid"][i]), parent_idx=int(i), T=len(_p_ids), raw_target=int(math.ceil(ratio * len(_p_ids))),
+                    t_star=len(prefixes[j]), prefix_ids=list(prefixes[j]), parent_response_ids=_p_ids, parent_text=_p_txt,
+                    first_token_after=(tok.decode([_p_ids[len(prefixes[j])]]) if len(prefixes[j]) < len(_p_ids) else None),
+                    cont_ids=list(conts[j]), cont_text=_c_txt, branch_response_ids=rowt["responses"][:_n].tolist(),
+                    branch_loss_mask=rowt["pbd_loss_mask"].tolist(), branch_response_mask=rowt["response_mask"].tolist(),
+                    branch_attn_valid=int(rowt["attention_mask"].sum()), parent_attn_valid=int(attn[i].sum()),
+                    student_images=(int(_gt.shape[0]) if _gt is not None else None), teacher_images=len(crops[i]),
+                    parent_loss_mask=loss_mask[i].tolist(), parent_response_mask=resp_attn[i].tolist(), leak_flags=[bool(f) for f in flags],
+                    pos_shape=list(pos.shape)))
         for k_, v_ in new.items():
             branch.batch[k_] = torch.stack(v_).to(batch.batch[k_].device if k_ in batch.batch.keys() else responses.device)
         branch.batch["pbd_is_branch"] = torch.ones(len(cand), dtype=torch.float32)
@@ -1774,7 +1803,20 @@ class RayPPOTrainer:
         n_b = int((branch.batch["pbd_loss_mask"].sum(-1) > 0).sum().item())
         merged.meta_info["pbd_scale"] = float(n_total) / float(n_v0)
         merged.meta_info["pbd_scale_b"] = float(n_total) / float(max(n_b, 1))
+        if dump_dir:
+            P.smoke_dump(dump_dir, f"trainer_step{int(self.global_steps)}.json", dict(
+                mode=mode, ratio=ratio, coverage=coverage, lam=float(sd.get("pbd_lambda", 0.5)), max_cont=max_cont, leak_mask_on=leak_mask_on,
+                B=int(B), dp=int(dp), n_sel=int(len(sel)), n_drop=int(n_drop), cand=[int(c_) for c_ in cand], n_b=int(n_b), n_total=int(n_total),
+                pbd_scale=merged.meta_info["pbd_scale"], pbd_scale_b=merged.meta_info["pbd_scale_b"], rows=dump_rows,
+                parent_pbd_loss_mask_sum=loss_mask.sum(-1).tolist(), parent_resp_valid=resp_attn.sum(-1).tolist(),
+                merged_is_branch=merged.batch["pbd_is_branch"].tolist()))
         metrics.update({
+            "pbd/leak_pos_rel_mean": float(np.mean(leak_rel)) if leak_rel else 0.0,
+            "pbd/leak_pos_rel_p50": float(np.percentile(leak_rel, 50)) if leak_rel else 0.0,
+            "pbd/leak_pos_rel_p90": float(np.percentile(leak_rel, 90)) if leak_rel else 0.0,
+            "pbd/parent_response_len_mean": float(np.mean(plen)) if plen else 0.0,
+            "pbd/branch_response_len_mean": float(np.mean([len(p) + l for p, l in zip(prefixes, yT_len)])) if yT_len else 0.0,
+            "pbd/parent_missing_answer_frac": miss_p / max(len(cand), 1), "pbd/branch_missing_answer_frac": miss_b / max(len(cand), 1),
             "pbd/t_star_rel_mean": float(np.mean([len(prefixes[j]) / max(len(P.unpad_response(responses[i], resp_attn[i])), 1) for j, i in enumerate(cand)])),
             "pbd/yT_len_mean": float(np.mean(yT_len)), "pbd/yT_trunc_frac": trunc / max(len(cand), 1),
             "pbd/leak_row_frac": leak_rows / max(len(cand), 1), "pbd/leak_tok_frac": leak_toks / max(n_toks, 1),

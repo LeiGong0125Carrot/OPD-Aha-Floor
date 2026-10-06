@@ -152,6 +152,36 @@ def parent_loss_mask(response_attn_row: torch.Tensor, k: Optional[int], mode: st
     return m
 
 
+ANSWER_RE = re.compile(r"<answer>\s*[^<]{1,40}\s*</answer>", re.I)
+
+
+def missing_answer(text: str) -> bool:
+    return ANSWER_RE.search(text or "") is None
+
+
+def leak_rel_positions(flags: list[bool]) -> list[float]:
+    n = len(flags)
+    return [j / n for j, f in enumerate(flags) if f] if n else []
+
+
+def smoke_dump(dirname: Optional[str], name: str, obj: Any) -> None:
+    """JSON dump for the pre-run integration test (14_P5_pre_run_integration_test_plan.md); no-op when dirname is None."""
+    if not dirname:
+        return
+    import json, os
+    def conv(x):
+        if torch.is_tensor(x): return x.detach().cpu().tolist()
+        if isinstance(x, np.ndarray): return x.tolist()
+        if isinstance(x, (np.integer,)): return int(x)
+        if isinstance(x, (np.floating,)): return float(x)
+        if isinstance(x, dict): return {str(k): conv(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)): return [conv(v) for v in x]
+        return x
+    os.makedirs(dirname, exist_ok=True)
+    with open(os.path.join(dirname, name), "w") as f:
+        json.dump(conv(obj), f)
+
+
 def coverage_select(n: int, coverage: float, seed: int, step: int) -> np.ndarray:
     """Indices of rollouts to branch: all for coverage>=1, else a seeded random subset (no targeting, §13.4/§14.3)."""
     if coverage >= 1.0:

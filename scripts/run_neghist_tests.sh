@@ -22,4 +22,4 @@ for t in test_sup test_floor test_tanh test_gamma; do
   CUDA_VISIBLE_DEVICES="" "$VOPD_PY" scripts/$t.py > /tmp/$t.out 2>&1
   echo "$t: $(tail -1 /tmp/$t.out)"
 done
-exit $(( r1 | r2 | r3 | r4 | r5 | r6 ))
+exit $(( r1 | r2 | r3 | r4 | r5 | r6 | r7 ))

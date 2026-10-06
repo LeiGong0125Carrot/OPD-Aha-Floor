@@ -20,6 +20,7 @@ Single Process Actor
 import logging
 import contextlib
 import os
+import numpy as np
 import time
 from types import SimpleNamespace
 from typing import Optional
@@ -1381,6 +1382,35 @@ class DataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * loss_scale_factor
                     else:
                         loss = policy_loss * loss_scale_factor
+                    _pbd_dump = os.environ.get("PBD_SMOKE_DUMP") or None
+                    if _pbd_dump and "pbd_is_branch" in model_inputs:
+                        from verl.utils.pbd import smoke_dump as _smoke_dump
+                        _r = torch.distributed.get_rank()
+                        _rm = model_inputs["response_mask"]; _ti = model_inputs["teacher_input_ids"]; _ta = model_inputs["teacher_attention_mask"]
+                        _st = int(model_inputs["teacher_response_start_idx"][0].item()); _R = _rm.shape[1]
+                        _t_resp = _ti[0, _st:_st + _R][_ta[0, _st:_st + _R].bool()].tolist()
+                        _s_resp = model_inputs["responses"][0][_rm[0].bool()].tolist()
+                        def _nimg(mm):
+                            try:
+                                g = mm.get("image_grid_thw") if isinstance(mm, dict) else None
+                                return int(g.shape[0]) if g is not None else None
+                            except Exception: return None
+                        _mm = model_inputs.get("multi_modal_inputs"); _tmm = model_inputs.get("teacher_multi_modal_inputs")
+                        _mm = _mm[0] if isinstance(_mm, (list, tuple, np.ndarray)) else _mm; _tmm = _tmm[0] if isinstance(_tmm, (list, tuple, np.ndarray)) else _tmm
+                        _smoke_dump(_pbd_dump, f"actor_rank{_r}_mb{batch_idx}_{self._pbd_dump_counter if hasattr(self, '_pbd_dump_counter') else 0}.json", dict(
+                            rank=_r, is_branch=float(model_inputs["pbd_is_branch"][0].item()),
+                            student_response_ids=_s_resp, teacher_response_ids=_t_resp,
+                            student_images=_nimg(_mm), teacher_images=_nimg(_tmm),
+                            null_present=bool(teacher_null_log_prob is not None), null_forward_ran=float(_null_forward_ran),
+                            teacher_null_keys=[k for k in model_inputs.keys() if "null" in str(k)],
+                            raw_jsd_token_mean=float(vopd_metrics.get("self_distillation/raw_jsd_token_mean", float("nan"))),
+                            num_distill_tokens=float(vopd_metrics.get("self_distillation/num_distill_tokens", float("nan"))),
+                            response_valid=int(_rm[0].sum().item()), pbd_loss_mask_sum=float(model_inputs["pbd_loss_mask"][0].sum().item()),
+                            loss=float(loss.detach().item()), loss_scale_factor=float(loss_scale_factor),
+                            pbd_scale=float(data.meta_info.get("pbd_scale", 1.0)), pbd_scale_b=float(data.meta_info.get("pbd_scale_b", 1.0)),
+                            lam=float(self_distillation_cfg.get("pbd_lambda", 0.5)), grad_accum=int(self.gradient_accumulation),
+                            finite=dict(student=bool(torch.isfinite(log_prob).all().item()), teacher=bool(torch.isfinite(teacher_log_prob).all().item()), loss=bool(torch.isfinite(loss).item()))))
+                        self._pbd_dump_counter = getattr(self, "_pbd_dump_counter", 0) + 1
                     backward_start = time.perf_counter()
                     if self.scaler is not None:
                         self.scaler.scale(loss).backward()
