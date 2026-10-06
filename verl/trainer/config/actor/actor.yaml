@@ -149,6 +149,14 @@ self_distillation:
   # Arm Amis only: 1 = one mismatched null; 2 = two mismatched nulls averaged in log space.
   counterfactual_null_num_views: 1
 
+  # P1 CFD (docs/proposals_2026-10-06): tilt (every existing path) | flip | flip_u
+  counterfactual_target_mode: tilt
+  flip_gamma: 50.0
+  flip_lambda: 1.0
+  flip_tail_policy: exclude
+  # A-t0 control: tilt beta = 0 at the first response token (t = 0 has no student prefix)
+  counterfactual_t0_beta_zero: false
+
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 

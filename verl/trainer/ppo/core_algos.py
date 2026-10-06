@@ -1167,9 +1167,46 @@ def compute_self_distillation_loss(
         raise ValueError(
             f"self_distillation.counterfactual_tanh_scale must be >= 0, got {counterfactual_tanh_scale}"
         )
+    # P1 (Counterfactual-Flip Distillation, docs/proposals_2026-10-06/01 + 06):
+    #   target_mode "tilt"   -> every existing path, bit-identical;
+    #   "flip"   -> on the flip set F = {t>=1: argmax p+ != argmax p0, argmax p+ not in tail} the target is the
+    #               gamma-sharpened p+ (explicit columns, tail mass preserved), elsewhere plain p+ (V0);
+    #   "flip_u" -> on F the A target softmax(log p+ + beta u), elsewhere plain p+ (isolates the off-flip tilt).
+    #   Positions in F get loss weight 1 + flip_lambda. t = 0 (no student prefix) is never in F by definition.
+    counterfactual_target_mode = str(getattr(self_distillation_config, "counterfactual_target_mode", "tilt") or "tilt")
+    _fg = getattr(self_distillation_config, "flip_gamma", 50.0)
+    flip_gamma = 50.0 if _fg is None else float(_fg)
+    _fl = getattr(self_distillation_config, "flip_lambda", 1.0)
+    flip_lambda = 1.0 if _fl is None else float(_fl)
+    flip_tail_policy = str(getattr(self_distillation_config, "flip_tail_policy", "exclude") or "exclude")
+    # A-t0 control (06 §1.1): the tilt's beta is 0 at the first response token, everything else = A.
+    counterfactual_t0_beta_zero = bool(getattr(self_distillation_config, "counterfactual_t0_beta_zero", False))
+    if counterfactual_target_mode not in ("tilt", "flip", "flip_u"):
+        raise ValueError(f"self_distillation.counterfactual_target_mode must be tilt|flip|flip_u, got {counterfactual_target_mode!r}")
+    _flip = counterfactual_target_mode in ("flip", "flip_u")
+    if _flip:
+        if counterfactual_null_mode is None or counterfactual_reference != "null":
+            raise ValueError("counterfactual_target_mode=flip/flip_u requires counterfactual_null_mode set and counterfactual_reference='null'")
+        if not (flip_gamma > 0.0):
+            raise ValueError(f"self_distillation.flip_gamma must be > 0, got {flip_gamma}")
+        if flip_lambda < 0.0:
+            raise ValueError(f"self_distillation.flip_lambda must be >= 0, got {flip_lambda}")
+        if flip_tail_policy not in ("exclude", "include"):
+            raise ValueError(f"self_distillation.flip_tail_policy must be exclude|include, got {flip_tail_policy!r}")
+        if counterfactual_target_gamma != 1.0 or counterfactual_tanh_scale > 0.0 or counterfactual_floor_alpha > 0.0 \
+                or counterfactual_u_clip_pos or counterfactual_st_enable or counterfactual_t0_beta_zero:
+            raise ValueError("counterfactual_target_mode=flip/flip_u is exclusive with target_gamma!=1, tanh, floor, u_clip_pos, st and t0_beta_zero")
+    if counterfactual_t0_beta_zero and counterfactual_null_mode is None:
+        raise ValueError("counterfactual_t0_beta_zero requires counterfactual_null_mode (it modifies the tilt)")
+    if counterfactual_t0_beta_zero and (counterfactual_st_enable or counterfactual_reference != "null"):
+        raise ValueError("counterfactual_t0_beta_zero is defined for the plain tilt path only (not with st or a student/teacher reference)")
     counterfactual_hist_adaptive_beta = bool(
         getattr(self_distillation_config, "counterfactual_hist_adaptive_beta", False)
     )
+    if _flip and counterfactual_hist_adaptive_beta:
+        raise ValueError("counterfactual_target_mode=flip/flip_u is exclusive with counterfactual_hist_adaptive_beta")
+    if counterfactual_t0_beta_zero and counterfactual_hist_adaptive_beta:
+        raise ValueError("counterfactual_t0_beta_zero is exclusive with counterfactual_hist_adaptive_beta")
     counterfactual_hist_alpha = float(
         getattr(self_distillation_config, "counterfactual_hist_alpha", 1.0) or 1.0
     )
@@ -1182,6 +1219,8 @@ def compute_self_distillation_loss(
     counterfactual_future_alpha = float(
         getattr(self_distillation_config, "counterfactual_future_alpha", 1.0) or 1.0
     )
+    if (_flip or counterfactual_t0_beta_zero) and counterfactual_future_weight:
+        raise ValueError("counterfactual_target_mode=flip/flip_u and t0_beta_zero are exclusive with counterfactual_future_weight")
     # History aggregation (arm C uses "cumsum", 04 §4). "mean" replaces the cumulative N_t by the
     # prefix MEAN conflict Nbar_t = N_t / (#valid tokens before t) and maps it with a reference
     # kappa: s_t = Nbar_t / (Nbar_t + kappa). Motivation (docs/negative_history/nhC_r1_casestudy.md):
@@ -1541,7 +1580,52 @@ def compute_self_distillation_loss(
                 if use_topk and self_distillation_config.distillation_add_tail:
                     teacher_tail_mass_per_token = _p_real[..., -1]
                 del _p_real
-            if counterfactual_st_enable:
+            if _flip:
+                with torch.no_grad():
+                    _real = teacher_real_distill_log_probs
+                    _null = teacher_null_distill_log_probs
+                    _a_real = _real.argmax(dim=-1)
+                    _a_null = _null.argmax(dim=-1)
+                    _has_tail = bool(use_topk and self_distillation_config.distillation_add_tail)
+                    _tail_idx = _real.shape[-1] - 1
+                    flip_raw = (_a_real != _a_null) & (loss_mask > 0)
+                    flip_tail_excl = flip_raw & (_a_real == _tail_idx) if _has_tail else torch.zeros_like(flip_raw)
+                    flip_set = flip_raw.clone()
+                    if _has_tail and flip_tail_policy == "exclude":
+                        flip_set = flip_set & ~flip_tail_excl
+                    flip_t0 = flip_raw[:, 0].clone()            # raw t=0 flips (before tail exclusion), reported as flip_t0_raw_sum
+                    flip_set[:, 0] = False                      # t = 0: no student prefix -> outside the method's domain
+                    if counterfactual_target_mode == "flip":
+                        # gamma-sharpen the EXPLICIT columns of p+, keep the tail bucket's mass (same rule as target_gamma)
+                        _explicit = torch.ones_like(_real, dtype=torch.bool)
+                        if _has_tail:
+                            _explicit[..., -1] = False
+                        _neg_inf = torch.finfo(_real.dtype).min
+                        if bool(_explicit.all()):
+                            _sharp = F.log_softmax(flip_gamma * _real, dim=-1)
+                        else:
+                            _mass = torch.logsumexp(_real.masked_fill(~_explicit, _neg_inf), dim=-1, keepdim=True)
+                            _scaled = flip_gamma * _real
+                            _z = torch.logsumexp(_scaled.masked_fill(~_explicit, _neg_inf), dim=-1, keepdim=True)
+                            _sharp = torch.where(_explicit, _scaled - _z + _mass, _real)
+                    else:  # flip_u: the A target, only on F
+                        _sharp = F.log_softmax(_real + counterfactual_extrapolation_beta * u_term, dim=-1)
+                    teacher_distill_log_probs = torch.where(flip_set.unsqueeze(-1), _sharp, _real).detach()
+                    # loss weight 1 + lambda on F, reused through the weighted-aggregation path (05 §14)
+                    nh_weight = (1.0 + flip_lambda * flip_set.float()) * loss_mask
+                    _Tn = loss_mask.sum(dim=1, keepdim=True).clamp(min=1.0)
+                    _rel = torch.arange(loss_mask.shape[1], device=loss_mask.device, dtype=torch.float32).unsqueeze(0) / (_Tn - 1.0).clamp(min=1.0)
+                    flip_pos_rel_sum = (_rel * flip_set.float()).sum().item()
+                    flip_count = flip_set.float().sum().item()
+                    flip_raw_count = flip_raw.float().sum().item()
+                    flip_tail_excl_count = flip_tail_excl.float().sum().item()
+                    flip_t0_count = flip_t0.float().sum().item()
+                    _q_f = teacher_distill_log_probs.exp()
+                    flip_tv_sum = (0.5 * (_q_f - _real.exp()).abs().sum(dim=-1) * flip_set.float()).sum().item()
+                    _s_arg = student_distill_log_probs.detach().argmax(dim=-1)
+                    flip_student_agree_sum = ((_s_arg == _a_real).float() * flip_set.float()).sum().item()
+                    del _q_f, _s_arg
+            elif counterfactual_st_enable:
                 # ST (selective suppression + conserved transfer), replaces the tilt:
                 # donors D = {u < -tau} ∩ Head(a; rho) ∩ Head(s; rho) lose
                 # delta = min(eps, alpha_max * mass(D)) of probability mass; recipients
@@ -1644,6 +1728,11 @@ def compute_self_distillation_loss(
                     )
                 else:
                     _tilt = counterfactual_extrapolation_beta * u_term
+                if counterfactual_t0_beta_zero:
+                    # A-t0 (06 §1.1): no tilt at the first response token (no student prefix there)
+                    _t0_mask = torch.ones(1, _tilt.shape[1], 1, device=_tilt.device, dtype=_tilt.dtype)
+                    _t0_mask[:, 0, :] = 0.0
+                    _tilt = _tilt * _t0_mask
                 teacher_distill_log_probs = F.log_softmax(
                     teacher_real_distill_log_probs + _tilt,
                     dim=-1,
@@ -1810,7 +1899,8 @@ def compute_self_distillation_loss(
     metrics["self_distillation/num_distill_tokens"] = loss_mask.sum().detach().item()
     metrics["self_distillation/counterfactual_target_enabled"] = float(counterfactual_null_mode is not None)
     metrics["self_distillation/counterfactual_extrapolation_beta"] = (
-        counterfactual_extrapolation_beta if counterfactual_null_mode is not None else 0.0
+        counterfactual_extrapolation_beta
+        if (counterfactual_null_mode is not None and counterfactual_target_mode != "flip") else 0.0
     )
     if counterfactual_target_tv_per_token is not None:
         metrics["self_distillation/counterfactual_target_tv"] = (
@@ -1819,6 +1909,24 @@ def compute_self_distillation_loss(
     metrics["self_distillation/reference_is_student"] = float(_ref_student)
     metrics["self_distillation/reference_swap_sides"] = float(_swap_sides)
     metrics["self_distillation/teacher_target_mode_internal"] = float(_internal)
+    metrics["self_distillation/counterfactual_target_mode_flip"] = float(counterfactual_target_mode == "flip")
+    metrics["self_distillation/counterfactual_target_mode_flip_u"] = float(counterfactual_target_mode == "flip_u")
+    metrics["self_distillation/t0_beta_zero"] = float(counterfactual_t0_beta_zero)
+    if _flip:
+        # count-based (sum) metrics: global rates = sum / num_distill_tokens across micro-batches (no max/min substrings)
+        metrics["self_distillation/flip_lambda"] = flip_lambda
+        metrics["self_distillation/flip_gamma"] = flip_gamma if counterfactual_target_mode == "flip" else 0.0
+        metrics["self_distillation/flip_count_sum"] = flip_count
+        metrics["self_distillation/flip_raw_count_sum"] = flip_raw_count
+        metrics["self_distillation/flip_tail_excluded_sum"] = flip_tail_excl_count
+        metrics["self_distillation/flip_t0_raw_sum"] = flip_t0_count
+        metrics["self_distillation/flip_frac"] = flip_count / max(loss_mask.sum().item(), 1.0)
+        metrics["self_distillation/flip_pos_rel_sum"] = flip_pos_rel_sum
+        metrics["self_distillation/flip_pos_rel_mean"] = flip_pos_rel_sum / max(flip_count, 1.0)
+        metrics["self_distillation/flip_target_tv_sum"] = flip_tv_sum
+        metrics["self_distillation/flip_target_tv_mean"] = flip_tv_sum / max(flip_count, 1.0)
+        metrics["self_distillation/flip_student_agree_sum"] = flip_student_agree_sum
+        metrics["self_distillation/flip_student_agree_frac"] = flip_student_agree_sum / max(flip_count, 1.0)
     if _internal:
         metrics["self_distillation/internal_lambda"] = internal_lambda
         metrics["self_distillation/internal_tail_is_full"] = float(internal_tail == "full")
