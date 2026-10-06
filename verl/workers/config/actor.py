@@ -122,6 +122,14 @@ class SelfDistillationConfig(BaseConfig):
     flip_lambda: float = 1.0
     flip_tail_policy: str = "exclude"      # exclude | include (argmax p+ in the tail bucket)
     counterfactual_t0_beta_zero: bool = False   # A-t0 control: beta = 0 at the first response token
+    # P5 PBD (docs/proposals_2026-10-06/12, 13): branch rows from crop-view continuations (verl/utils/pbd.py)
+    pbd_enable: bool = False
+    pbd_ratio: float = 0.10          # prefix ratio of |y^S| (snapped to a word boundary)
+    pbd_coverage: float = 1.0        # fraction of rollouts branched (random subset below 1.0; no targeting)
+    pbd_lambda: float = 0.5          # weight of the branch term (fixed, not swept)
+    pbd_mode: str = "keep"           # keep | replace (parent rows lose t >= t*)
+    pbd_max_cont_len: int = 256      # continuation cap
+    pbd_leak_mask: bool = False      # 13 §20.2(b): leak words are monitored, not masked (set True to mask them)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -193,6 +201,21 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.teacher_image_key is required when teacher_always_on=True "
                 "(unless teacher_prompt_mode='answer_hint')"
             )
+        if self.pbd_enable:
+            if not (0.0 < self.pbd_ratio < 1.0):
+                raise ValueError(f"self_distillation.pbd_ratio must be in (0,1), got {self.pbd_ratio}")
+            if not (0.0 < self.pbd_coverage <= 1.0):
+                raise ValueError(f"self_distillation.pbd_coverage must be in (0,1], got {self.pbd_coverage}")
+            if self.pbd_lambda < 0.0:
+                raise ValueError("self_distillation.pbd_lambda must be >= 0")
+            if self.pbd_mode not in ("keep", "replace"):
+                raise ValueError(f"self_distillation.pbd_mode must be 'keep' or 'replace', got {self.pbd_mode}")
+            if self.pbd_max_cont_len < 1:
+                raise ValueError("self_distillation.pbd_max_cont_len must be >= 1")
+            if self.counterfactual_null_mode is not None:
+                raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
+            if self.teacher_target_mode not in (None, "legacy"):
+                raise ValueError("PBD requires teacher_target_mode=legacy")
         if self.counterfactual_null_mode not in (None, "mean_color", "mismatch_crop"):
             raise ValueError(
                 "self_distillation.counterfactual_null_mode must be None, 'mean_color' or 'mismatch_crop', "

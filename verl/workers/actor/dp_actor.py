@@ -945,6 +945,10 @@ class DataParallelPPOActor(BasePPOActor):
         # Include rollout_log_probs for computing rollout_corr metrics in bypass mode
         if "rollout_log_probs" in data.batch.keys():
             select_keys.append("rollout_log_probs")
+        # P5 PBD branch rows (verl/utils/pbd.py)
+        for _k in ("pbd_loss_mask", "pbd_is_branch"):
+            if _k in data.batch.keys():
+                select_keys.append(_k)
 
         has_multi_modal_inputs = self._has_non_empty_multi_modal_inputs(
             data.non_tensor_batch.get("multi_modal_inputs")
@@ -972,6 +976,15 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         mini_batches = data.split(self.config.ppo_mini_batch_size)
+        _pbd_rows = "pbd_is_branch" in data.batch.keys()
+        if _pbd_rows:
+            # P5 PBD: branch rows enlarge the batch beyond ppo_mini_batch_size*n. Keep ONE optimizer step per
+            # iteration over all rows (V0 semantics); the V0/branch weighting is applied in core_algos.
+            if self.config.use_dynamic_bsz:
+                raise ValueError("PBD rows require use_dynamic_bsz=False (loss_scale_factor would be mis-normalised)")
+            if self.config.ppo_epochs != 1:
+                raise ValueError("PBD rows require ppo_epochs=1 (single on-policy update)")
+            mini_batches = [data]
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
 
@@ -1004,7 +1017,8 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
                     self.gradient_accumulation = (
-                        self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                        (mini_batch.batch.batch_size[0] if _pbd_rows else self.config.ppo_mini_batch_size)
+                        // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
@@ -1276,6 +1290,10 @@ class DataParallelPPOActor(BasePPOActor):
                             batch_num_tokens=self.config.global_batch_info.get("batch_num_tokens"),
                             global_batch_size=self.config.global_batch_info.get("global_batch_size"),
                             loss_scale_factor=self.config.global_batch_info.get("loss_scale_factor"),
+                            pbd_loss_mask=model_inputs.get("pbd_loss_mask"),
+                            pbd_is_branch=model_inputs.get("pbd_is_branch"),
+                            pbd_scale=float(data.meta_info.get("pbd_scale", 1.0)),
+                            pbd_scale_b=data.meta_info.get("pbd_scale_b", None),
                         )
                         loss_compute_time = time.perf_counter() - loss_compute_start
                         stage_wall_time_totals["timing_s/update_actor/loss_compute"] += loss_compute_time

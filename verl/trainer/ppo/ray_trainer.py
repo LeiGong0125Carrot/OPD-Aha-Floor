@@ -1648,6 +1648,142 @@ class RayPPOTrainer:
             "self_distillation_mask": self_distillation_mask,
         }), metrics
 
+    # ------------------------------------------------------------------ P5 PBD (verl/utils/pbd.py)
+    def _pbd_cfg(self):
+        sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if sd is None or not bool(sd.get("pbd_enable", False)):
+            return None
+        if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") != "vopd":
+            raise ValueError("pbd_enable requires policy_loss.loss_mode=vopd")
+        if sd.get("counterfactual_null_mode", None) is not None:
+            raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be null")
+        if not self.async_rollout_mode:
+            raise ValueError("PBD needs the agent-loop (async) rollout to generate crop-view continuations")
+        return sd
+
+    def _maybe_append_pbd_branch_rows(self, batch: DataProto, timing_raw: dict) -> tuple[DataProto, dict]:
+        """After rollout: for a (random) subset of rollouts, continue y_{<t*} under the crop view with the
+        rollout engine and append BRANCH ROWS (student prompt + prefix + y^T) to the batch. Adds batch tensors
+        pbd_is_branch [B], pbd_loss_mask [B, R], pbd_t_star [B] for every row and meta_info["pbd_scale"]."""
+        from verl.utils import pbd as P
+        sd = self._pbd_cfg()
+        if sd is None:
+            return batch, {}
+        ratio = float(sd.get("pbd_ratio", 0.10)); coverage = float(sd.get("pbd_coverage", 1.0))
+        mode = str(sd.get("pbd_mode", "keep")); max_cont = int(sd.get("pbd_max_cont_len", 256))
+        leak_mask_on = bool(sd.get("pbd_leak_mask", False))
+        teacher_image_key = sd.get("teacher_image_key", None)
+        if not teacher_image_key or teacher_image_key not in batch.non_tensor_batch:
+            raise ValueError("PBD needs self_distillation.teacher_image_key (crop image) in the batch")
+        tok = self.tokenizer; pad_id = tok.pad_token_id or 0
+        B = batch.batch.batch_size[0]
+        responses = batch.batch["responses"]; attn = batch.batch["attention_mask"]
+        R = responses.shape[1]; prompt_len = batch.batch["prompts"].shape[1]
+        resp_attn = attn[:, prompt_len:]
+        # ---- pick rows and prefixes
+        sel = P.coverage_select(B, coverage, int(self.config.data.get("seed", 42)), int(self.global_steps))
+        cand, prefixes = [], []
+        for i in sel.tolist():
+            ids = P.unpad_response(responses[i], resp_attn[i])
+            k = P.snap_prefix_len(tok, ids, ratio)
+            if k is None:
+                continue
+            cand.append(i); prefixes.append(ids[:k])
+        # every dispatch chunks the batch into dp equal parts -> keep (B + n_branch) % dp == 0 (drop the tail of the
+        # random subset; it carries no targeting information)
+        dp = int(self._get_dp_size(self.actor_rollout_wg, "actor"))
+        n_drop = (B + len(cand)) % dp
+        if n_drop:
+            cand, prefixes = cand[: len(cand) - n_drop], prefixes[: len(prefixes) - n_drop]
+        metrics = {"pbd/branch_candidates": float(len(sel)), "pbd/branch_rows": float(len(cand)),
+                   "pbd/branch_frac_of_batch": float(len(cand)) / max(B, 1), "pbd/dropped_for_dp": float(n_drop)}
+        is_branch = torch.zeros(B, dtype=torch.float32)
+        t_star = torch.full((B,), -1, dtype=torch.long)
+        loss_mask = resp_attn.to(torch.float32).clone()
+        if not cand:
+            batch.batch["pbd_is_branch"] = is_branch; batch.batch["pbd_loss_mask"] = loss_mask; batch.batch["pbd_t_star"] = t_star
+            batch.meta_info["pbd_scale"] = 1.0
+            return batch, metrics
+        # ---- crop-view generation batch
+        raw = batch.non_tensor_batch["raw_prompt"]; crops = batch.non_tensor_batch[teacher_image_key]
+        gen_nt = {
+            "raw_prompt": np.array([P.crop_view_messages(list(raw[i]), crops[i][-1]) for i in cand], dtype=object),
+            "agent_name": np.array(["pbd_branch"] * len(cand), dtype=object),
+            "pbd_prefix_ids": np.array([list(p) for p in prefixes] + [None], dtype=object)[:-1],
+            "pbd_max_cont_len": np.array([max_cont] * len(cand), dtype=object),
+        }
+        for key in ("uid", "data_source", "reward_model", "extra_info"):
+            if key in batch.non_tensor_batch:
+                gen_nt[key] = batch.non_tensor_batch[key][cand]
+        from tensordict import TensorDict as _TD
+        gen = DataProto(batch=_TD({"pbd_dummy": torch.zeros(len(cand), dtype=torch.int32)}, batch_size=(len(cand),)),
+                        non_tensor_batch=gen_nt, meta_info={"global_steps": self.global_steps, "validate": False})
+        # the agent-loop manager chunks the batch over its workers -> pad like the main rollout does
+        size_divisor = int(self.config.actor_rollout_ref.rollout.agent.num_workers)
+        gen, pad_size = pad_dataproto_to_divisor(gen, size_divisor)
+        with marked_timer("pbd_gen", timing_raw, color="magenta"):
+            out = self.async_rollout_manager.generate_sequences(gen)
+        out = unpad_dataproto(out, pad_size=pad_size)
+        timing = out.meta_info.pop("timing", None)
+        if timing:
+            for k_, v_ in timing.items():
+                timing_raw[f"pbd_gen/{k_}"] = v_
+        out_resp = out.batch["responses"]; out_mask = out.batch["response_mask"]
+        conts = [P.unpad_response(out_resp[j], out_mask[j]) for j in range(len(cand))]
+        # ---- branch rows = parent copies with the response replaced
+        branch = batch.select_idxs(np.array(cand))
+        new = {k_: [] for k_ in ("responses", "input_ids", "attention_mask", "response_mask", "position_ids", "pbd_loss_mask", "pbd_t_star")}
+        yT_len, trunc, leak_rows, leak_toks, n_toks = [], 0, 0, 0, 0
+        mm_inputs = batch.non_tensor_batch.get("multi_modal_inputs", None)
+        # self-check (review 2): the helper must reproduce the rollout's position ids on a parent row
+        _i0 = cand[0]
+        _pos0 = P.compute_position_ids(self.processor, batch.batch["input_ids"][_i0].unsqueeze(0), attn[_i0].unsqueeze(0),
+                                       dict(mm_inputs[_i0]) if mm_inputs is not None else {}).squeeze(0)
+        if not torch.equal(_pos0.to(batch.batch["position_ids"].dtype), batch.batch["position_ids"][_i0].cpu()):
+            raise RuntimeError("PBD compute_position_ids does not reproduce the rollout position_ids on a parent row")
+        for j, i in enumerate(cand):
+            flags = P.leak_token_mask(tok, conts[j]) if conts[j] else []
+            leak_rows += int(any(flags)); leak_toks += int(sum(flags)); n_toks += len(conts[j])
+            yT_len.append(len(conts[j])); trunc += int(len(conts[j]) >= max_cont)
+            rowt = P.make_branch_row_tensors(batch.batch["prompts"][i], attn[i, :prompt_len], prefixes[j], conts[j], R, pad_id,
+                                             flags if leak_mask_on else None)
+            pos = P.compute_position_ids(self.processor, rowt["input_ids"].unsqueeze(0), rowt["attention_mask"].unsqueeze(0),
+                                         dict(mm_inputs[i]) if mm_inputs is not None else {})
+            pos = pos.squeeze(0)
+            if pos.shape != batch.batch["position_ids"][i].shape:
+                raise RuntimeError(f"PBD position_ids shape {tuple(pos.shape)} != parent {tuple(batch.batch['position_ids'][i].shape)}")
+            for k_ in ("responses", "input_ids", "attention_mask", "response_mask", "pbd_loss_mask", "pbd_t_star"):
+                new[k_].append(rowt[k_])
+            new["position_ids"].append(pos.to(batch.batch["position_ids"].dtype))
+            # parent bookkeeping
+            t_star[i] = len(prefixes[j])
+            loss_mask[i] = P.parent_loss_mask(resp_attn[i], len(prefixes[j]), mode)
+        for k_, v_ in new.items():
+            branch.batch[k_] = torch.stack(v_).to(batch.batch[k_].device if k_ in batch.batch.keys() else responses.device)
+        branch.batch["pbd_is_branch"] = torch.ones(len(cand), dtype=torch.float32)
+        if "rollout_log_probs" in branch.batch.keys():
+            branch.batch["rollout_log_probs"] = torch.zeros_like(branch.batch["rollout_log_probs"])
+        batch.batch["pbd_is_branch"] = is_branch; batch.batch["pbd_loss_mask"] = loss_mask; batch.batch["pbd_t_star"] = t_star
+        # keep the parent order first, branch rows after; old_log_probs must be recomputed (rollout ones are not
+        # defined for y^T under the student view) -> drop the rollout log-probs so the reuse shortcut cannot fire
+        merged = DataProto.concat([batch, branch])
+        merged.meta_info = dict(batch.meta_info)
+        if "rollout_log_probs" in merged.batch.keys():
+            merged.batch.pop("rollout_log_probs")
+        n_total, n_v0 = merged.batch.batch_size[0], B
+        n_b = int((branch.batch["pbd_loss_mask"].sum(-1) > 0).sum().item())
+        merged.meta_info["pbd_scale"] = float(n_total) / float(n_v0)
+        merged.meta_info["pbd_scale_b"] = float(n_total) / float(max(n_b, 1))
+        metrics.update({
+            "pbd/t_star_rel_mean": float(np.mean([len(prefixes[j]) / max(len(P.unpad_response(responses[i], resp_attn[i])), 1) for j, i in enumerate(cand)])),
+            "pbd/yT_len_mean": float(np.mean(yT_len)), "pbd/yT_trunc_frac": trunc / max(len(cand), 1),
+            "pbd/leak_row_frac": leak_rows / max(len(cand), 1), "pbd/leak_tok_frac": leak_toks / max(n_toks, 1),
+            "pbd/prefix_len_mean": float(np.mean([len(p) for p in prefixes])), "pbd/scale": merged.meta_info["pbd_scale"],
+            "pbd/scale_b": merged.meta_info["pbd_scale_b"], "pbd/branch_rows_with_loss": float(n_b),
+            "pbd/mode_replace": float(mode == "replace"), "pbd/leak_mask_on": float(leak_mask_on),
+        })
+        return merged, metrics
+
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = (
             set({"data_source", "reward_model", "extra_info", "uid", "raw_prompt", "teacher_prompt"})
@@ -2588,6 +2724,10 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    # P5 PBD: crop-view continuations -> branch rows appended to the batch (verl/utils/pbd.py)
+                    batch, _pbd_metrics = self._maybe_append_pbd_branch_rows(batch, timing_raw)
+                    if _pbd_metrics:
+                        metrics.update(_pbd_metrics)
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)

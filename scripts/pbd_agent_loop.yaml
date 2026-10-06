@@ -1,0 +1,6 @@
+- name: single_turn_agent
+  _target_: verl.experimental.agent_loop.single_turn_agent_loop.SingleTurnAgentLoop
+- name: tool_agent
+  _target_: verl.experimental.agent_loop.tool_agent_loop.ToolAgentLoop
+- name: pbd_branch
+  _target_: verl.experimental.agent_loop.pbd_agent_loop.PBDBranchAgentLoop

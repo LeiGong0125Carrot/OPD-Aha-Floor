@@ -1105,6 +1105,10 @@ def compute_self_distillation_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    pbd_loss_mask: Optional[torch.Tensor] = None,
+    pbd_is_branch: Optional[torch.Tensor] = None,
+    pbd_scale: float = 1.0,          # V0 rows: N_total / N_v0
+    pbd_scale_b: Optional[float] = None,   # branch rows: N_total / N_branch (defaults to pbd_scale)
 ) -> tuple[torch.Tensor, dict[str, Any]]:
 
     metrics = {}
@@ -1112,6 +1116,13 @@ def compute_self_distillation_loss(
     loss_mask = response_mask
     if self_distillation_mask is not None:
         loss_mask = loss_mask * self_distillation_mask.unsqueeze(1)
+    # P5 PBD: branch rows only learn on t >= t* minus leak tokens; Replace parents lose t >= t*.
+    # response_mask itself stays 1 on real tokens (it doubles as the teacher attention mask).
+    _pbd = pbd_is_branch is not None
+    if pbd_loss_mask is not None:
+        loss_mask = loss_mask * pbd_loss_mask.to(loss_mask.dtype)
+    if _pbd and getattr(self_distillation_config, "counterfactual_null_mode", None) is not None:
+        raise ValueError("PBD rows present but counterfactual_null_mode is set (PBD v0.1 is V0-based)")
 
     counterfactual_null_mode = getattr(self_distillation_config, "counterfactual_null_mode", None)
     # Reference distribution for the tilt u = log p_real - log p_ref (candidate S,
@@ -1882,6 +1893,23 @@ def compute_self_distillation_loss(
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         weighted_per_token_loss = weighted_per_token_loss * rollout_is_weights
+    if _pbd:
+        # 12 §3.4 / 13 §19: L = mean_{V0 rows}(JSD) + lambda * mean_{branch rows}(JSD). Rows are token-mean
+        # aggregated by the caller over ALL rows (micro-batch = row), so weight V0 rows by
+        # scale = N_total/N_v0 and branch rows by lambda*scale (scale passed from the trainer).
+        _lam = float(getattr(self_distillation_config, "pbd_lambda", 0.5))
+        _isb = pbd_is_branch.to(weighted_per_token_loss.dtype).unsqueeze(1)
+        _sb = float(pbd_scale if pbd_scale_b is None else pbd_scale_b)
+        # V0 rows: N/N_v0 ; branch rows: lambda * N/N_b  ->  mean over all rows = mean_v0 + lambda * mean_branch
+        _w = pbd_scale * (1.0 - _isb) + _lam * _sb * _isb
+        # Replace parents keep only t < t*: weight the row by its kept-token fraction so the V0 term stays a
+        # token-level average over M^S (12 §3.4) instead of promoting a 10-token prefix to a full row (Keep: 1).
+        if pbd_loss_mask is not None:
+            _kept = (response_mask * pbd_loss_mask.to(response_mask.dtype)).sum(-1, keepdim=True)
+            _tot = response_mask.sum(-1, keepdim=True).clamp(min=1.0)
+            _frac = (_kept / _tot).to(weighted_per_token_loss.dtype)
+            _w = _w * ((1.0 - _isb) * _frac + _isb)
+        weighted_per_token_loss = weighted_per_token_loss * _w
 
     valid_token_count = loss_mask.sum().clamp(min=1.0)
     if batch_num_tokens is None:
@@ -1897,6 +1925,21 @@ def compute_self_distillation_loss(
     else:
         metrics["self_distillation/self_distillation_mask.mean()"] = self_distillation_mask.float().mean().detach().item()
     metrics["self_distillation/num_distill_tokens"] = loss_mask.sum().detach().item()
+    if _pbd:
+        _isb_row = pbd_is_branch.to(loss_mask.dtype).unsqueeze(1)
+        _m_b = loss_mask * _isb_row
+        _m_v = loss_mask * (1.0 - _isb_row)
+        # tail-8 of each row's loss positions (13 §16.2 J^tail)
+        _rev = torch.flip(torch.cumsum(torch.flip(loss_mask, dims=[1]), dim=1), dims=[1])
+        _tail = loss_mask * (_rev <= 8).to(loss_mask.dtype)
+        for _name, _mm in (("pbd_jsd_branch", _m_b), ("pbd_jsd_v0", _m_v),
+                           ("pbd_jsd_tail8_branch", _tail * _isb_row), ("pbd_jsd_tail8_v0", _tail * (1.0 - _isb_row))):
+            metrics[f"self_distillation/{_name}_sum"] = verl_F.masked_sum(raw_per_token_loss, _mm).detach().item()
+            metrics[f"self_distillation/{_name}_cnt"] = _mm.sum().detach().item()
+        metrics["self_distillation/pbd_branch_rows"] = pbd_is_branch.float().sum().detach().item()
+        metrics["self_distillation/pbd_rows"] = float(pbd_is_branch.numel())
+        metrics["self_distillation/pbd_scale"] = float(pbd_scale)
+        metrics["self_distillation/pbd_scale_b"] = float(pbd_scale if pbd_scale_b is None else pbd_scale_b)
     metrics["self_distillation/counterfactual_target_enabled"] = float(counterfactual_null_mode is not None)
     metrics["self_distillation/counterfactual_extrapolation_beta"] = (
         counterfactual_extrapolation_beta

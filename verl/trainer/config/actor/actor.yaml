@@ -157,6 +157,15 @@ self_distillation:
   # A-t0 control: tilt beta = 0 at the first response token (t = 0 has no student prefix)
   counterfactual_t0_beta_zero: false
 
+  # P5 PBD: privileged-view branch distillation (V0 base; see verl/utils/pbd.py)
+  pbd_enable: false
+  pbd_ratio: 0.10
+  pbd_coverage: 1.0
+  pbd_lambda: 0.5
+  pbd_mode: keep
+  pbd_max_cont_len: 256
+  pbd_leak_mask: false
+
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 
