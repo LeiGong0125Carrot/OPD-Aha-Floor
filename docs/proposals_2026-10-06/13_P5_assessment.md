@@ -389,3 +389,43 @@ $$J^{\text{tail}}_i=\text{分支行最后 }k\text{ 个 token 上 }\mathrm{JSD}(p
 做了这一步，分支行成本从"一次全图 prefill"降到"几十个 token 的前向"，**全量分支约 1.05× V0**，覆盖率的选择题与 §14.3 的"零结果不可判读"同时消失。这不是把工程项当贡献，而是它决定主臂能否在"一次 null"上限内做到全覆盖，所以应在主臂**之前**实现。若实现周期不可接受，退回 §14.3 的预登记：主臂用随机一半（一次性超出上限），零结果直接判可实现性。
 
 实现落点：`dp_actor._forward_micro_batch` 之外新增 `_forward_shared_prefix(prefix, suffixes)`；full-attention 层走 KV cache 续算，GatedDeltaNet 层走 `past_key_values` 里的递归状态分叉（HF 的 Qwen3.5 实现已支持 cache 续算，训练路径下需关闭 remove-padding 对该 micro-batch 的打包）。测试：与不共享的两次完整前向在 loss 与学生梯度上逐 bit 对拍。
+
+---
+
+## 17. 对 §16 的核查（10-06 20:30，助手）
+
+### 17.1 §16.2 $J^{\text{tail}}$：接受
+
+不抽取、不用标签、与 $J_i$ 同口径；"末尾是 V0 行 JSD 最低区域、用相对量 1.5×"合理。一点补充：0% 档的 $J^{\text{tail}}$ 是"学生在教师整条路径末尾的分歧"，与中间比例档的含义略有不同（前者没有学生自己的前缀参与），比较时注明。
+
+### 17.2 §16.3 前缀共享：方向对，但"HF 已支持 cache 续算"不成立，工程量被低估
+
+查 `transformers/models/qwen3_5/modeling_qwen3_5.py`（环境内版本）与 `fla 0.4.2`：
+
+| 项 | 实际情况 |
+|---|---|
+| 层结构 | 32 层，`full_attention_interval=4`：**24 层 GatedDeltaNet + 8 层 full attention**（§16.3 的数字正确） |
+| GDN 层用缓存状态的条件 | `use_precomputed_states = cache 有状态 **且 seq_len == 1**`（L433–434）。多 token 后缀走 chunk 路径时 **`initial_state=None`**（L505），即 HF 实现只支持逐 token 解码续算，**不支持从缓存状态续算一段后缀** |
+| fla 内核 | `chunk_gated_delta_rule` 支持 `initial_state` 且反向返回 `dh0`（`chunk.py` L173/277），**内核层面可以做**，但要绕过 HF 的层 forward 自己调 |
+| 短卷积状态 | `update_conv_state` 用 `copy_` 原地更新（L221），autograd 不安全；后缀续算需要把前缀最后 kernel−1 个 token 的卷积前激活以函数式方式拼到后缀前 |
+| full-attention 层 | 带 KV 续算在训练模式下可行（flash-attn + 位置偏移），但 verl 的 remove-padding / Ulysses 路径对该 micro-batch 要整体绕开 |
+| 数值 | **不会逐 bit 相同**：chunk 内核按 64 token 分块，在 $t^*$ 处切开会改变分块边界；flash-attn 带 cache 与整段计算也有浮点差。测试判据应为 allclose（bf16 下 loss 相对误差 ~1e-3），不是 bit-identity |
+
+结论：前缀共享需要**自写一条训练前向路径**（GDN 层直接调 fla 内核并传入前缀末状态、函数式卷积状态、full-attn 层 KV 续算、位置偏移、梯度经前缀累加），不是在现有 forward 上接一个 cache。估计 **2 周含测试**，风险在 fla 的 `dh0` 梯度与 bf16 下的数值漂移；它本身是一个可独立验收的工程件。
+
+### 17.3 §16.3 的 1.05× 漏算了两项
+
+- **生成 $y^T$ 的 crop 视图 prefill**：vLLM 里 crop 视图的 prompt（两张图）与学生 rollout 的 prompt 不同，前缀缓存不能复用，每个分支 rollout 要再做一次约 8k token 的 prefill。vLLM 的 prefill 比训练前向便宜，但量级上仍是"每条 rollout 一次全图编码"，约 0.3–0.5 个 null 当量。
+- **教师在分支行上的打分前向**：可与教师 real 前向共享教师前缀（同样需要上面的共享路径），否则再加一次全图 prefill。
+
+修正后：共享前缀实现后全量分支 ≈ **1.05× 训练前向 + 0.3–0.5 null 当量的生成**，仍在"一次 null"上限内；未实现前全量分支 ≈ 2–2.5 null 当量。
+
+### 17.4 顺序建议
+
+共享前缀是否值得投 2 周，取决于预检 (b′)(b″) 是否通过。建议并行而非串行：
+
+1. 预检（1 卡，几小时，不需要任何训练代码）→ (b′)(b″) 不过则 P5 关线，共享前缀不做；
+2. 预检通过 → **主臂先用随机一半覆盖跑一次**（≈ 2 null 当量，一次性超上限，零结果可直接判可实现性），同时开工共享前缀；
+3. 主臂有信号 → 用共享前缀做全覆盖的正式两次运行；主臂 ≈ V0 → 按 §14.3 判可实现性，共享前缀停工。
+
+这样最坏情况（预检不过或主臂无信号）不花 2 周工程；最好情况正式运行只晚一轮。
