@@ -47,9 +47,9 @@ A 相对 V0 的收益：V\* +5，TB +1–2。同配置同 seed 的 A 四次 TB �
 | 表征/注意力探针（149 题） | 全图前向中层是否盯住 GT 区域 | 8 个 full-attn 层 | — | — | **成立**：中层 lift 6×，但集中度越高差距越大（看了但没看清）；信息在 20–31 层才成偏好 | full_to_priv_probe §3 |
 | per-token baseline（离线预检） | u 的跨题一致风格分量可剥离 | b(v)=E[u(v)] | — | — | 判否：held-out 解释力 −6% | opd_aha_mechanism_conclusion §5 |
 | batch 信号（作者建议，三种读法） | 从同 batch 其他样本拿 null/特权信号 | 读法 1 = Table 7；读法 2 = 序列级加权（离开框架、已有工作）；读法 3 = 共识当伪特权（TTRL 族） | 共识投票 52.1% vs 单条 47.6%，全错一致组 12.5% | — | 均不在框架内或信号弱；转为 Amis | group_relative_teacher_signal_plan |
-| **Amis**（mismatched-crop null，进行中） | null 第二张图换成同 batch 另一 prompt 的 crop，抵消风格通道 | `null_mode=mismatch_crop` | r2 47.90（30/40/50）；r1 待 | 待 | 待终审；格式漂移未减反增（形态变为裸选项收尾） | amis_results_2026-10-05 |
+| **Amis**（mismatched-crop null ×2） | null 第二张图换成同 batch 另一 prompt 的 crop，抵消风格通道 | `null_mode=mismatch_crop` | 49.14 / 47.90 | 89.53 / 90.58 | **判负**：V\* 只保住 A 增益的 1/3，TB ≤ V0；真实 crop 必带假证据，色块的价值正是"无内容"；漂移形态变为裸选项收尾 | amis_results_2026-10-05 |
 
-**跨线结论**：null 是一个反事实，只存在于"换输入再算一次"里；残差流不储存"换个输入会说什么"；学生/batch 来源的参照要么随学生漂移、要么退化为对 V0 的加权。省算力的唯一精确解是前缀共享的双分支（未实现）。
+**跨线结论**：null 是一个反事实，只存在于"换输入再算一次"里，且其内容必须**不含证据**（Amis 证明真实 crop 做 null 会引入假证据）；残差流不储存"换个输入会说什么"；学生/batch 来源的参照要么随学生漂移、要么退化为对 V0 的加权。省算力的唯一精确解是前缀共享的双分支（未实现）。
 
 ## 4. 更早的线（旧仓库，均已关闭）
 
