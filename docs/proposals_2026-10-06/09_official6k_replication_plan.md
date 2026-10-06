@@ -1,4 +1,6 @@
-# 09 官方 Vision-OPD-6K 全量复现：A / Ahm / Ahf（2026-10-06 立项）
+# 09 官方 Vision-OPD-6K 全量复现：Ahm / Ahf（2026-10-06 立项；A 不自训，直接评公开 ckpt）
+
+> 10-06 下午更新（用户）：OPD-Aha 在 6K 上的训练原文已经做过，不再自训 A，直接评测公开 ckpt `CewEhao/OPD-Aha-4B`（同一条评测流水线：ZoomBench / HR-Bench 4K / 8K / V\*，rule-first 与 pure-llm 双口径）。A 的 hold 与编排器已取消；下文的 A 配置保留作为 Ahm/Ahf 的配方参照。
 
 ## 0. 为什么做
 
@@ -28,10 +30,10 @@
 - 代码：全部用 OPD-Aha 的 `eval/infer.py`（vLLM serve，perception chat template，max_tokens 4096，temperature 0）+ `eval/judge_qwenlm.py` + `cal_acc.py`。
 - Judge：gpt-oss-120b，两种 protocol 分目录保存：`eval/judge/rule-first/<bench>/` 与 `eval/judge/pure-llm/<bench>/`。注意 ZoomBench 不在 `MCQ_BENCHMARKS` 里，rule-first 对它只做 mathruler 精确匹配后全部交 LLM，所以两口径在 ZoomBench 上预期接近；V\* 的 rule-first 走首字母规则。
 - 全部 13 个 ckpt 都测，峰值各报各的；评测完按 V\* 峰 + ZoomBench 峰裁剪（`trim_off6k.sh`）。
-- A 的编排器顺带给 08 号文档里的 14 个旧 ckpt（含 base、官方 OPD-Aha-4B）补 pure-llm 判分，使新旧表同口径。
+- `orch_zoom3` 顺带给 08 号文档里的 14 个旧 ckpt（含 base、官方 OPD-Aha-4B）补 V\* 推理与 pure-llm 判分，使新旧表同口径。
 
 ## 3. 执行
 
-- hold：20927452（A）、20927453（Ahm）、20927868（Ahf），各 3 卡 / 1T / 1d15h；编排器 `orch_off6k{A,Ahm,Ahf}.sbatch`（standard 分区 job 20927958–60）：冒烟 2 步（检查 null 前向、hist 开关）→ 训练（`resume_mode=auto`，hold 到期可重投续跑）→ 评测 → 裁剪 → 释放 hold。
+- hold：20927453（Ahm）、20927868（Ahf），各 3 卡 / 1T / 1d15h；编排器 `orch_off6k{Ahm,Ahf}.sbatch`（standard 分区 job 20928147/48）；官方 ckpt 与旧臂名单的双口径判卷走 `orch_zoom3.sbatch`（1 卡 hold 20927219）：冒烟 2 步（检查 null 前向、hist 开关）→ 训练（`resume_mode=auto`，hold 到期可重投续跑）→ 评测 → 裁剪 → 释放 hold。
 - 预计：训练 ≈ 27–31 h（n8 单步 ≈ 750–850 s），评测 ≈ 3 h/臂。
 - 判读：分基准报告，不合并；Ahm/Ahf vs A 用逐题 paired bootstrap（同 08 §2）。
