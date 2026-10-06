@@ -11,7 +11,7 @@
 - 评测：`Vision-OPD-setup/eval_zoom.sh`（独立于 TB/V\* 流水线；模型清单驱动、幂等），vLLM 服务 + 原 `infer.py`，judge = `judge_qwenlm.py` rule-first 协议 + gpt-oss-120b（与我们的 V\* 口径一致；ZoomBench 不在 MCQ 列表，开放题与规则判错的 MCQ 都送 LLM）。
 - 只能评各臂保留的峰值 ckpt（TB 峰 / V\* 峰）；这是"按别的基准选 ckpt"的口径，判读时注明。卡型：RTX Pro 6000（B200 与环境不兼容）。
 
-## 3. 第一批结果（10-06 10:10，judge 口径 = rule-first + gpt-oss-120b；Ahm-50 / Ahmr2-50 待）
+## 3. 第一批结果（10-06 10:15，13 个 ckpt 全部 judge 口径 = rule-first + gpt-oss-120b）
 
 | 模型（峰值 ckpt） | ZoomBench judge（845） | MCQ（621） | 开放题（224） |
 |---|---|---|---|
@@ -35,6 +35,7 @@
 - **sup-only 被分开了**：55.98，比 A 低 4 点，MCQ 与开放题都低。V\* 上的"同分"是 191 题的饱和效应；**"正半边可去"这一条从压缩梯子里降级为"不可去"**。
 - Amis 按 TB/V\* 峰选的 ckpt 低 2–4 点，但 r2 的 step50 反而 59.4 接近 A：各基准的峰 ckpt 不重合，判读必须等全步补评并在大基准上重选。
 - 开放题（224 道）是拉开差距的地方：A 43–47，sup/Amis 40–43，base 37。
+- Ahm：step50（V\* 峰 94.24 的那个 ckpt）61.30 为全表最高，step40 58.46、r2 59.05；两次之差 2.3 点，仍在 A 的带内（58.7–60.2），不构成超过。
 
 ## 4. 压缩方向的梯子（哪些组件能去）
 
