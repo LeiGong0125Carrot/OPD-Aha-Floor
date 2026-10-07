@@ -165,6 +165,7 @@ self_distillation:
   pbd_mode: keep
   pbd_max_cont_len: 256
   pbd_leak_mask: false
+  pbd_cont_view: teacher_prompt
 
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0

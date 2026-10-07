@@ -18,7 +18,8 @@ from typing import Any, Optional
 import numpy as np
 import torch
 
-LEAK_RE = re.compile(r"zoom|close-up|closeup|crop|enlarg|magnif|inset|second image|zoomed", re.I)
+LEAK_RE = re.compile(r"zoom|close-up|closeup|crop|enlarg|magnif|inset|second image|zoomed|visible region|highlighted region|red box|red bounding|masked|blacked|black region", re.I)
+IMAGE_TAG_RE = re.compile(r"(<image>)")
 
 
 def snap_prefix_len(tokenizer, ids: list[int], ratio: float, min_len: int = 1) -> Optional[int]:
@@ -92,6 +93,36 @@ def crop_view_messages(raw_prompt: list[dict], crop_image: Any) -> list[dict]:
     return list(raw_prompt[:-1]) + [{"role": "user", "content": new_content}]
 
 
+def teacher_view_messages(teacher_prompt_messages: list[dict], teacher_images: list) -> list[dict]:
+    """Continuation view = the teacher_prompt itself (e.g. the hide parquet: '<image>\n{question}', one hide image,
+    no hint sentence). Replicates RayPPOTrainer._build_teacher_messages_from_template on path dicts."""
+    imgs = []
+    for im in teacher_images:
+        if isinstance(im, dict):
+            d = dict(im); d.pop("type", None)
+            if "image" not in d and "path" in d: d["image"] = d["path"]
+            if "image" not in d: raise ValueError(f"teacher image dict without image/path: {list(d)}")
+            imgs.append({"type": "image", **d})
+        else:
+            imgs.append({"type": "image", "image": im})
+    out, k = [], 0
+    for m in teacher_prompt_messages:
+        c = m["content"]
+        if not isinstance(c, str):
+            out.append(dict(m)); continue
+        cl = []
+        for seg in [x for x in IMAGE_TAG_RE.split(c) if x != ""]:
+            if seg == "<image>":
+                if k >= len(imgs): raise ValueError("teacher_prompt has more <image> tags than teacher images")
+                cl.append(imgs[k]); k += 1
+            else:
+                cl.append({"type": "text", "text": seg})
+        out.append({"role": m.get("role", "user"), "content": cl})
+    if k != len(imgs):
+        raise ValueError(f"teacher_prompt placeholders ({k}) != teacher images ({len(imgs)})")
+    return out
+
+
 def unpad_response(responses_row: torch.Tensor, attn_row: torch.Tensor) -> list[int]:
     return responses_row[attn_row.bool()].tolist()
 
@@ -153,10 +184,13 @@ def parent_loss_mask(response_attn_row: torch.Tensor, k: Optional[int], mode: st
 
 
 ANSWER_RE = re.compile(r"<answer>\s*[^<]{1,40}\s*</answer>", re.I)
+LETTER_RE = re.compile(r"(?:^|\n)\s*\(?([A-H])[\.\):]|\banswer\s*(?:is|:)\s*\**\(?([A-H])\b", re.I)
 
 
 def missing_answer(text: str) -> bool:
-    return ANSWER_RE.search(text or "") is None
+    """Monitor only: no <answer>..</answer> tag AND no option-letter answer ('C. staff', 'answer is C')."""
+    t = text or ""
+    return ANSWER_RE.search(t) is None and LETTER_RE.search(t) is None
 
 
 def leak_rel_positions(flags: list[bool]) -> list[float]:

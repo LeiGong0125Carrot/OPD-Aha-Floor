@@ -1667,6 +1667,7 @@ class RayPPOTrainer:
         if lam < 0.0: raise ValueError("pbd_lambda must be >= 0")
         if str(sd.get("pbd_mode", "keep")) not in ("keep", "replace"): raise ValueError("pbd_mode must be keep|replace")
         if int(sd.get("pbd_max_cont_len", 256)) < 1: raise ValueError("pbd_max_cont_len must be >= 1")
+        if str(sd.get("pbd_cont_view", "teacher_prompt")) not in ("teacher_prompt", "crop_append"): raise ValueError("pbd_cont_view must be teacher_prompt|crop_append")
         if self.config.actor_rollout_ref.actor.get("use_dynamic_bsz", False): raise ValueError("PBD requires use_dynamic_bsz=False")
         if int(self.config.actor_rollout_ref.actor.get("ppo_epochs", 1)) != 1: raise ValueError("PBD requires ppo_epochs=1")
         return sd
@@ -1716,8 +1717,18 @@ class RayPPOTrainer:
             return batch, metrics
         # ---- crop-view generation batch
         raw = batch.non_tensor_batch["raw_prompt"]; crops = batch.non_tensor_batch[teacher_image_key]
+        cont_view = str(sd.get("pbd_cont_view", "teacher_prompt"))
+        if cont_view == "teacher_prompt":
+            if "teacher_prompt" not in batch.non_tensor_batch:
+                raise ValueError("pbd_cont_view=teacher_prompt needs the teacher_prompt column")
+            tp = batch.non_tensor_batch["teacher_prompt"]
+            _msgs = [P.teacher_view_messages(list(tp[i]), list(crops[i])) for i in cand]
+        else:
+            _msgs = [P.crop_view_messages(list(raw[i]), crops[i][-1]) for i in cand]
+        _msgs_arr = np.empty(len(_msgs), dtype=object)
+        for _j, _m in enumerate(_msgs): _msgs_arr[_j] = _m
         gen_nt = {
-            "raw_prompt": np.array([P.crop_view_messages(list(raw[i]), crops[i][-1]) for i in cand], dtype=object),
+            "raw_prompt": _msgs_arr,
             "agent_name": np.array(["pbd_branch"] * len(cand), dtype=object),
             "pbd_prefix_ids": np.array([list(p) for p in prefixes] + [None], dtype=object)[:-1],
             "pbd_max_cont_len": np.array([max_cont] * len(cand), dtype=object),
@@ -1806,6 +1817,7 @@ class RayPPOTrainer:
         if dump_dir:
             P.smoke_dump(dump_dir, f"trainer_step{int(self.global_steps)}.json", dict(
                 mode=mode, ratio=ratio, coverage=coverage, lam=float(sd.get("pbd_lambda", 0.5)), max_cont=max_cont, leak_mask_on=leak_mask_on,
+                cont_view=cont_view, teacher_images_per_row=int(len(crops[cand[0]])),
                 B=int(B), dp=int(dp), n_sel=int(len(sel)), n_drop=int(n_drop), cand=[int(c_) for c_ in cand], n_b=int(n_b), n_total=int(n_total),
                 pbd_scale=merged.meta_info["pbd_scale"], pbd_scale_b=merged.meta_info["pbd_scale_b"], rows=dump_rows,
                 parent_pbd_loss_mask_sum=loss_mask.sum(-1).tolist(), parent_resp_valid=resp_attn.sum(-1).tolist(),
@@ -1823,6 +1835,7 @@ class RayPPOTrainer:
             "pbd/prefix_len_mean": float(np.mean([len(p) for p in prefixes])), "pbd/scale": merged.meta_info["pbd_scale"],
             "pbd/scale_b": merged.meta_info["pbd_scale_b"], "pbd/branch_rows_with_loss": float(n_b),
             "pbd/mode_replace": float(mode == "replace"), "pbd/leak_mask_on": float(leak_mask_on),
+            "pbd/cont_view_teacher_prompt": float(cont_view == "teacher_prompt"),
         })
         return merged, metrics
 

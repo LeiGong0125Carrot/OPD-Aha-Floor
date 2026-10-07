@@ -9,10 +9,17 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PBD_MODE="${PBD_MODE:-keep}"
+PBD_VIEW="${PBD_VIEW:-hide}"   # hide: ONE hide image as the privileged view (train_6k_armA_hide.parquet, teacher_prompt '<image>\n{q}', no hint)
+                               # crop: pair data, continuation under [full][crop] (crop_append); scoring teacher keeps teacher_prompt
 case "$PBD_MODE" in keep) T=PBDk;; replace) T=PBDr;; *) echo "PBD_MODE must be keep|replace"; exit 1;; esac
+case "$PBD_VIEW" in
+  hide) T="${T}H"; DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6k_armA_hide.parquet; CONT_VIEW=teacher_prompt;;
+  crop) DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet; CONT_VIEW=crop_append;;
+  *) echo "PBD_VIEW must be hide|crop"; exit 1;;
+esac
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${T}${RUN_SUFFIX:-}_6karmA}"
-export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet}"
+export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-$DEF_FILE}"
 export TEACHER_MODEL_SOURCE=legacy TEACHER_REGULARIZATION=frozen TEACHER_UPDATE_RATE=0.0
 export COUNTERFACTUAL_NULL_MODE=null COUNTERFACTUAL_EXTRAPOLATION_BETA=0.0
 export ALPHA=0.5 LR="${LR:-2e-6}" MAX_PROMPT_LENGTH=8192 MAX_RESPONSE_LENGTH=1024 DATA_SEED=42
@@ -23,7 +30,7 @@ export ROLLOUT_GPU_MEMORY_UTILIZATION=0.45
 export VOPD_FORBID_NULL=1   # V0 base: any null-view construction is a bug
 export ACTOR_USE_DYNAMIC_BSZ=False
 PBD_RATIO="${PBD_RATIO:-0.10}"; PBD_COVERAGE="${PBD_COVERAGE:-0.5}"; PBD_LAMBDA="${PBD_LAMBDA:-0.5}"; PBD_MAXCONT="${PBD_MAXCONT:-256}"; PBD_LEAK_MASK="${PBD_LEAK_MASK:-False}"
-echo "${EXPERIMENT_NAME_OVERRIDE}: PBD mode=${PBD_MODE} ratio=${PBD_RATIO} coverage=${PBD_COVERAGE} lambda=${PBD_LAMBDA} maxcont=${PBD_MAXCONT} leak_mask=${PBD_LEAK_MASK} (V0 base, no null; seed42, pair)"
+echo "${EXPERIMENT_NAME_OVERRIDE}: PBD view=${PBD_VIEW} (cont_view=${CONT_VIEW}, data=$(basename $TASK_TRAIN_FILE)) mode=${PBD_MODE} ratio=${PBD_RATIO} coverage=${PBD_COVERAGE} lambda=${PBD_LAMBDA} maxcont=${PBD_MAXCONT} leak_mask=${PBD_LEAK_MASK} (V0 base, no null; seed42, pair)"
 echo "  并行配置: n_gpus=${TRAINER_N_GPUS_PER_NODE} ulysses_sp=${ULYSSES_SP:-1} rollout_n=${ROLLOUT_N} lr=${LR}"
 exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.pbd_enable=True \
@@ -33,6 +40,7 @@ exec "${PROJECT_ROOT}/scripts/run_visual_counterfactual_unit.sh" \
     actor_rollout_ref.actor.self_distillation.pbd_lambda="${PBD_LAMBDA}" \
     actor_rollout_ref.actor.self_distillation.pbd_max_cont_len="${PBD_MAXCONT}" \
     actor_rollout_ref.actor.self_distillation.pbd_leak_mask="${PBD_LEAK_MASK}" \
+    actor_rollout_ref.actor.self_distillation.pbd_cont_view="${CONT_VIEW}" \
     actor_rollout_ref.rollout.agent.agent_loop_config_path="${PROJECT_ROOT}/scripts/pbd_agent_loop.yaml" \
     +actor_rollout_ref.rollout.limit_images=2 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \

@@ -38,7 +38,8 @@ def main():
         check(f"[row {r['parent_idx']}] prefix_ids == parent[:t*] (exact, no retokenisation)", pre == pr[:k])
         check(f"[row {r['parent_idx']}] token at t* starts a word", (r["first_token_after"] or "").startswith((" ", "\n")), repr(r["first_token_after"]))
         check(f"[row {r['parent_idx']}] no visual special tokens in parent/branch responses", not (set(pr) & vis_special) and not (set(r["branch_response_ids"]) & vis_special))
-        check(f"[row {r['parent_idx']}] student view = 1 image, teacher crop field = 2 images", r["student_images"] == 1 and r["teacher_images"] == 2, f"{r['student_images']}/{r['teacher_images']}")
+        n_teach = T.get("teacher_images_per_row", 2)
+        check(f"[row {r['parent_idx']}] student view = 1 image, teacher view = {n_teach} image(s)", r["student_images"] == 1 and r["teacher_images"] == n_teach, f"{r['student_images']}/{r['teacher_images']}")
         br = r["branch_response_ids"]; yT = r["cont_ids"]; n = len(br)
         check(f"[row {r['parent_idx']}] branch = prefix ⊕ y^T (up to truncation)", br[:k] == pr[:k] and br[k:] == yT[: n - k])
         lm = r["branch_loss_mask"]; rm = r["branch_response_mask"]
@@ -58,8 +59,9 @@ def main():
     # ---- C agent loop
     al = [json.load(open(f)) for f in glob.glob(os.path.join(D, "agentloop_*.json"))]
     check("agent-loop dumps present (>= branch rows, incl. padding)", len(al) >= len(rows), f"{len(al)} >= {len(rows)}")
+    n_gen = T.get("teacher_images_per_row", 2) if T.get("cont_view", "crop_append") == "teacher_prompt" else 2
     for x in al:
-        check(f"[gen {x['uid'][:8]}] crop-view = 2 images, order image,image,text", x["n_images"] == 2 and x["content_types"][:2] == ["image", "image"] and x["content_types"][-1] == "text", str(x["content_types"]))
+        check(f"[gen {x['uid'][:8]}] continuation view = {n_gen} image(s), images before text", x["n_images"] == n_gen and x["content_types"][:n_gen] == ["image"] * n_gen and x["content_types"][-1] == "text", str(x["content_types"]))
         check(f"[gen {x['uid'][:8]}] prompt tail == prefix ids; final = template + prefix", x["prompt_tail_equals_prefix"] and x["final_prompt_len"] == x["prompt_len_before_prefix"] + x["prefix_len"])
         check(f"[gen {x['uid'][:8]}] continuation <= cap", x["cont_len"] <= x["max_cont"])
     # match continuation ids between agent loop and trainer rows
@@ -79,7 +81,7 @@ def main():
     for x in ac:
         tag = f"[actor r{x['rank']} {'B' if x['is_branch']>0.5 else 'V0'} n={x['response_valid']}]"
         check(f"{tag} student and teacher score the same response ids", x["student_response_ids"] == x["teacher_response_ids"])
-        check(f"{tag} student view full-image only (1), teacher view [full,crop] (2)", x["student_images"] == 1 and x["teacher_images"] == 2, f"{x['student_images']}/{x['teacher_images']}")
+        check(f"{tag} student view full-image only (1), teacher view {T.get('teacher_images_per_row', 2)} image(s)", x["student_images"] == 1 and x["teacher_images"] == T.get("teacher_images_per_row", 2), f"{x['student_images']}/{x['teacher_images']}")
         check(f"{tag} no null forward / tensors", (not x["null_present"]) and x["null_forward_ran"] == 0.0 and not x["teacher_null_keys"])
         check(f"{tag} finite logits/loss", all(x["finite"].values()))
         check(f"{tag} scales and lambda", abs(x["pbd_scale"] - T["pbd_scale"]) < 1e-9 and abs(x["pbd_scale_b"] - T["pbd_scale_b"]) < 1e-9 and abs(x["lam"] - T["lam"]) < 1e-12)
