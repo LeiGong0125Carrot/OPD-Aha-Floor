@@ -184,13 +184,18 @@ def parent_loss_mask(response_attn_row: torch.Tensor, k: Optional[int], mode: st
 
 
 ANSWER_RE = re.compile(r"<answer>\s*[^<]{1,40}\s*</answer>", re.I)
-LETTER_RE = re.compile(r"(?:^|\n)\s*\(?([A-H])[\.\):]|\banswer\s*(?:is|:)\s*\**\(?([A-H])\b", re.I)
+LETTER_RE = re.compile(r"(?:^|\n)\s*\**\(?([A-H])\b[\.\):*]?|\banswer\s*(?:is)?\s*:?\s*\**\(?([A-H])\b", re.I)
 
 
 def missing_answer(text: str) -> bool:
-    """Monitor only: no <answer>..</answer> tag AND no option-letter answer ('C. staff', 'answer is C')."""
+    """Monitor only: no <answer>..</answer> tag AND no option-letter answer in the final part of the text
+    ('C. staff', 'answer is C', 'answer is:\n\n**B**'). Looks after </think> or in the last 200 chars so that
+    options enumerated mid-reasoning do not count as an answer."""
     t = text or ""
-    return ANSWER_RE.search(t) is None and LETTER_RE.search(t) is None
+    if ANSWER_RE.search(t) is not None:
+        return False
+    tail = t.split("</think>")[-1] if "</think>" in t else t[-200:]
+    return LETTER_RE.search(tail) is None
 
 
 def leak_rel_positions(flags: list[bool]) -> list[float]:
