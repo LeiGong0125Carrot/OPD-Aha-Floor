@@ -531,3 +531,14 @@ null 前向只占 V0 行的 13%，"一次 null"上限只够 25% 覆盖；50% 覆
 | 评测 | 峰值 ckpt，选择基准与报告基准分离；ZoomBench / HR-Bench 4K/8K 配对 bootstrap 对 V0；OCR / 开放式分拆 |
 
 训练期监控：被选行 $|y^T|$ 分布（$\hat D$ 与 $J$ 均偏短续写）；行级与位置级泄漏词频；分支项 / V0 项 JSD 之比（§12 §4 预期同步下降）；回答长度与缺 `<answer>` 率。
+
+---
+
+## 21. 实现、预跑验证与特权视图改为 hide（10-06 晚，助手）
+
+- **实现**（sup 59178f3 → f2608a4 → 0e820b5）：`verl/utils/pbd.py`、`pbd_branch` agent loop、trainer 分支阶段（rollout 后、response_mask/balance 前）、dp_actor 单 mini-batch、core_algos 行加权（V0 行 N/N_v0，分支行 λ·N/N_b；Replace 父行再乘保留 token 比例）与 `pbd_jsd_*` 指标；code review 四条必改已修（分支行 mm_token_type_ids 重建、crop 图 dict 规范化、λ 双 scale、Replace 父行权重）。
+- **预跑验证**（14 号计划）：一步真机集成测试，12 题 × n=2，Keep 覆盖 1.0 / Replace 覆盖 0.5（N_b ≠ N_v0）。crop 两图版：Keep 586 项全过（反传总损失与独立重构的 mean_v0 + λ·mean_branch 差 1.45e-9），Replace 全过（1.65e-9）。诊断块与检查日志存于 sup `docs/proposals_2026-10-06/14_smoke_results/`。
+- **特权视图改为 hide**（用户 10-06 20:00）：续写教师与打分教师都只看一张 hide 图（`train_6k_armA_hide.parquet`，teacher_prompt `<image>\n{q}`，无提示语；旧 V0 基线即此数据）。动机：没有"第二张图"可提，措辞泄漏的来源消失；用户同时说明泄漏词本身无所谓（Vision-OPD 带红框和提示语照样有效），泄漏只留监控。hide 版一步集成测试 Keep 586 项全过（1.43e-9）、Replace 全过（1.73e-9）；hide 下泄漏词只剩 "inset / zoomed-in inset / red box"，0.3% 位置。
+- **冒烟观测**：24 行批步时 138 s（续写生成 11.6 s）；y^T 均长 149；分支行与 V0 行 JSD 同量级（0.025 vs 0.027）。
+- **正式运行**：Keep r1（hold 20913092）、Replace r1（hold 20971535），标签 `pair_PBDkH_6karmA` / `pair_PBDrH_6karmA`，10% / 随机 50% / λ=0.5 / 上限 256，51 步、每 5 步存，评测 V\* + ZoomBench 双口径，裁剪留双峰。对照：V0-hide（StdOPD-region r2，step 30/40/50/51）正在补 V\* + ZoomBench。
+- 工程备注：训练批行数必须同时被 dp（3）和 agent loop worker 数（8）整除；分支生成批按 worker 数 pad、分支行数按 dp 对齐（随机子集的尾部丢弃）。
