@@ -10,14 +10,14 @@ rc_all=0
 for MODE in ${MODES:-keep replace}; do
   DUMP="$PROJECT_ROOT/eval/pbd_smoke/${PBD_VIEW:-hide}_$MODE"; rm -rf "$DUMP"; mkdir -p "$DUMP"
   echo "================ PBD smoke mode=$MODE $(date)"
-  rm -rf "$PROJECT_ROOT/checkpoints/pair_PBDsmoke${MODE}_6karmA"
+  rm -rf "$PROJECT_ROOT/checkpoints/pair_PBDsmoke${PBD_VIEW:-hide}${MODE}_6karmA"
   COV=1.0; [ "$MODE" = replace ] && COV=0.5
   PBD_SMOKE_DUMP="$DUMP" PBD_VIEW="${PBD_VIEW:-hide}" PBD_MODE=$MODE PBD_COVERAGE=$COV TRAIN_BATCH_SIZE=12 PPO_MIMI_BATCH_SIZE=12 ROLLOUT_N=2 \
-    TRAINER_TOTAL_TRAINING_STEPS=1 TRAINER_SAVE_FREQ=1000 EXPERIMENT_NAME_OVERRIDE=pair_PBDsmoke${MODE}_6karmA \
+    TRAINER_TOTAL_TRAINING_STEPS=1 TRAINER_SAVE_FREQ=1000 EXPERIMENT_NAME_OVERRIDE=pair_PBDsmoke${PBD_VIEW:-hide}${MODE}_6karmA \
     TRAINER_N_GPUS_PER_NODE="${TRAINER_N_GPUS_PER_NODE:-3}" ULYSSES_SP=1 \
     bash scripts/train_pair_pbd.sh trainer.resume_mode=disable > "$DUMP/train.log" 2>&1; rc=$?
   echo "train exit=$rc; dumps: $(ls $DUMP | wc -l) files"
-  rm -rf "$PROJECT_ROOT/checkpoints/pair_PBDsmoke${MODE}_6karmA"
+  rm -rf "$PROJECT_ROOT/checkpoints/pair_PBDsmoke${PBD_VIEW:-hide}${MODE}_6karmA"
   [ $rc -eq 0 ] || { echo "!! training step failed (mode=$MODE); tail:"; grep -aE "Error|Traceback|raise" "$DUMP/train.log" | grep -v codecache | tail -5; rc_all=1; continue; }
   "$PYBIN" scripts/test_pbd_integration.py --dump "$DUMP" --mode "$MODE" | tee "$DUMP/check.log"; r=${PIPESTATUS[0]}
   [ $r -eq 0 ] || rc_all=1

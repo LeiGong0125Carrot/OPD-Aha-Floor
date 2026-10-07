@@ -1726,7 +1726,8 @@ class RayPPOTrainer:
         elif cont_view == "swap_images":
             if "teacher_prompt" in batch.non_tensor_batch:
                 raise ValueError("pbd_cont_view=swap_images is for data without teacher_prompt (the scoring teacher would use the template)")
-            _msgs = [P.swap_view_messages(list(raw[i]), list(crops[i])) for i in cand]
+            _rfn = P.hf_resize_fn(self.processor) if self.processor is not None else None
+            _msgs = [P.swap_view_messages(list(raw[i]), list(crops[i]), resize_fn=_rfn) for i in cand]
         else:
             _msgs = [P.crop_view_messages(list(raw[i]), crops[i][-1]) for i in cand]
         _msgs_arr = np.empty(len(_msgs), dtype=object)
@@ -1840,6 +1841,7 @@ class RayPPOTrainer:
             "pbd/scale_b": merged.meta_info["pbd_scale_b"], "pbd/branch_rows_with_loss": float(n_b),
             "pbd/mode_replace": float(mode == "replace"), "pbd/leak_mask_on": float(leak_mask_on),
             "pbd/cont_view_teacher_prompt": float(cont_view == "teacher_prompt"),
+            "pbd/cont_view_swap_images": float(cont_view == "swap_images"),
         })
         return merged, metrics
 

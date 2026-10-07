@@ -132,7 +132,25 @@ def _norm_image_item(im) -> dict:
     return {"type": "image", "image": im}
 
 
-def swap_view_messages(raw_prompt: list[dict], teacher_images: list) -> list[dict]:
+def hf_resize_fn(processor):
+    """(path|PIL) -> (resized_height, resized_width) exactly as the HF image processor resizes when it is handed the
+    ORIGINAL image (the scoring teacher path). Passing these to qwen_vl_utils avoids a second rounding/resample, so the
+    vLLM continuation view gets the same image grid as the scoring teacher (review 10-07: 15% of official crops differed)."""
+    from PIL import Image as _Image
+    from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+    ip = processor.image_processor
+    factor = int(ip.patch_size) * int(ip.merge_size)
+    lo, hi = int(ip.size["shortest_edge"]), int(ip.size["longest_edge"])
+    def fn(img):
+        if isinstance(img, str):
+            with _Image.open(img) as im: w, h = im.size
+        else:
+            w, h = img.size
+        return smart_resize(h, w, factor=factor, min_pixels=lo, max_pixels=hi)
+    return fn
+
+
+def swap_view_messages(raw_prompt: list[dict], teacher_images: list, resize_fn=None) -> list[dict]:
     """Continuation view for data WITHOUT a teacher_prompt column (official Vision-OPD-6K): the student messages
     with every image item replaced, in order, by the teacher images -- the same construction as
     RayPPOTrainer._swap_images_in_messages used by the scoring teacher (text, incl. any hint, unchanged)."""
@@ -145,7 +163,10 @@ def swap_view_messages(raw_prompt: list[dict], teacher_images: list) -> list[dic
         for it in c:
             if isinstance(it, dict) and it.get("type") == "image":
                 if k >= len(teacher_images): raise ValueError("fewer teacher images than prompt images")
-                nc.append(_norm_image_item(teacher_images[k])); k += 1
+                item = _norm_image_item(teacher_images[k]); k += 1
+                if resize_fn is not None:
+                    item["resized_height"], item["resized_width"] = resize_fn(item["image"])
+                nc.append(item)
             else:
                 nc.append(it)
         out.append({**m, "content": nc})
