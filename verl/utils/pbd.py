@@ -123,6 +123,37 @@ def teacher_view_messages(teacher_prompt_messages: list[dict], teacher_images: l
     return out
 
 
+def _norm_image_item(im) -> dict:
+    if isinstance(im, dict):
+        d = dict(im); d.pop("type", None)
+        if "image" not in d and "path" in d: d["image"] = d["path"]
+        if "image" not in d: raise ValueError(f"teacher image dict without image/path: {list(d)}")
+        return {"type": "image", **d}
+    return {"type": "image", "image": im}
+
+
+def swap_view_messages(raw_prompt: list[dict], teacher_images: list) -> list[dict]:
+    """Continuation view for data WITHOUT a teacher_prompt column (official Vision-OPD-6K): the student messages
+    with every image item replaced, in order, by the teacher images -- the same construction as
+    RayPPOTrainer._swap_images_in_messages used by the scoring teacher (text, incl. any hint, unchanged)."""
+    out, k = [], 0
+    for m in raw_prompt:
+        c = m.get("content")
+        if not isinstance(c, list):
+            out.append(dict(m)); continue
+        nc = []
+        for it in c:
+            if isinstance(it, dict) and it.get("type") == "image":
+                if k >= len(teacher_images): raise ValueError("fewer teacher images than prompt images")
+                nc.append(_norm_image_item(teacher_images[k])); k += 1
+            else:
+                nc.append(it)
+        out.append({**m, "content": nc})
+    if k != len(teacher_images):
+        raise ValueError(f"teacher images ({len(teacher_images)}) != prompt image items ({k})")
+    return out
+
+
 def unpad_response(responses_row: torch.Tensor, attn_row: torch.Tensor) -> list[int]:
     return responses_row[attn_row.bool()].tolist()
 

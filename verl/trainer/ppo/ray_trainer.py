@@ -1667,7 +1667,7 @@ class RayPPOTrainer:
         if lam < 0.0: raise ValueError("pbd_lambda must be >= 0")
         if str(sd.get("pbd_mode", "keep")) not in ("keep", "replace"): raise ValueError("pbd_mode must be keep|replace")
         if int(sd.get("pbd_max_cont_len", 256)) < 1: raise ValueError("pbd_max_cont_len must be >= 1")
-        if str(sd.get("pbd_cont_view", "teacher_prompt")) not in ("teacher_prompt", "crop_append"): raise ValueError("pbd_cont_view must be teacher_prompt|crop_append")
+        if str(sd.get("pbd_cont_view", "teacher_prompt")) not in ("teacher_prompt", "crop_append", "swap_images"): raise ValueError("pbd_cont_view must be teacher_prompt|crop_append|swap_images")
         if self.config.actor_rollout_ref.actor.get("use_dynamic_bsz", False): raise ValueError("PBD requires use_dynamic_bsz=False")
         if int(self.config.actor_rollout_ref.actor.get("ppo_epochs", 1)) != 1: raise ValueError("PBD requires ppo_epochs=1")
         return sd
@@ -1723,6 +1723,10 @@ class RayPPOTrainer:
                 raise ValueError("pbd_cont_view=teacher_prompt needs the teacher_prompt column")
             tp = batch.non_tensor_batch["teacher_prompt"]
             _msgs = [P.teacher_view_messages(list(tp[i]), list(crops[i])) for i in cand]
+        elif cont_view == "swap_images":
+            if "teacher_prompt" in batch.non_tensor_batch:
+                raise ValueError("pbd_cont_view=swap_images is for data without teacher_prompt (the scoring teacher would use the template)")
+            _msgs = [P.swap_view_messages(list(raw[i]), list(crops[i])) for i in cand]
         else:
             _msgs = [P.crop_view_messages(list(raw[i]), crops[i][-1]) for i in cand]
         _msgs_arr = np.empty(len(_msgs), dtype=object)

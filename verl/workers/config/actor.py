@@ -130,7 +130,7 @@ class SelfDistillationConfig(BaseConfig):
     pbd_mode: str = "keep"           # keep | replace (parent rows lose t >= t*)
     pbd_max_cont_len: int = 256      # continuation cap
     pbd_leak_mask: bool = False      # 13 §20.2(b): leak words are monitored, not masked (set True to mask them)
-    pbd_cont_view: str = "teacher_prompt"   # teacher_prompt (= the parquet's teacher view, e.g. ONE hide image, no hint) | crop_append ([student images][crop] + question)
+    pbd_cont_view: str = "teacher_prompt"   # swap_images (official 6K: student text, images -> bbox_images) | teacher_prompt (= the parquet's teacher view, e.g. ONE hide image, no hint) | crop_append ([student images][crop] + question)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -213,8 +213,8 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError(f"self_distillation.pbd_mode must be 'keep' or 'replace', got {self.pbd_mode}")
             if self.pbd_max_cont_len < 1:
                 raise ValueError("self_distillation.pbd_max_cont_len must be >= 1")
-            if self.pbd_cont_view not in ("teacher_prompt", "crop_append"):
-                raise ValueError(f"self_distillation.pbd_cont_view must be 'teacher_prompt' or 'crop_append', got {self.pbd_cont_view}")
+            if self.pbd_cont_view not in ("teacher_prompt", "crop_append", "swap_images"):
+                raise ValueError(f"self_distillation.pbd_cont_view must be teacher_prompt|crop_append|swap_images, got {self.pbd_cont_view}")
             if self.counterfactual_null_mode is not None:
                 raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
             if self.teacher_target_mode not in (None, "legacy"):

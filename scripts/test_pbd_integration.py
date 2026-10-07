@@ -59,7 +59,7 @@ def main():
     # ---- C agent loop
     al = [json.load(open(f)) for f in glob.glob(os.path.join(D, "agentloop_*.json"))]
     check("agent-loop dumps present (>= branch rows, incl. padding)", len(al) >= len(rows), f"{len(al)} >= {len(rows)}")
-    n_gen = T.get("teacher_images_per_row", 2) if T.get("cont_view", "crop_append") == "teacher_prompt" else 2
+    n_gen = T.get("teacher_images_per_row", 2) if T.get("cont_view", "crop_append") in ("teacher_prompt", "swap_images") else 2
     for x in al:
         check(f"[gen {x['uid'][:8]}] continuation view = {n_gen} image(s), images before text", x["n_images"] == n_gen and x["content_types"][:n_gen] == ["image"] * n_gen and x["content_types"][-1] == "text", str(x["content_types"]))
         check(f"[gen {x['uid'][:8]}] prompt tail == prefix ids; final = template + prefix", x["prompt_tail_equals_prefix"] and x["final_prompt_len"] == x["prompt_len_before_prefix"] + x["prefix_len"])

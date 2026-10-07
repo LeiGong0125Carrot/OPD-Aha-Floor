@@ -5,16 +5,20 @@
 #   OFF_MODE=Ahf -> + history+future-adaptive beta on the negative half (hist_mode=hf, kappa=0.10) tag off6k_Ahf
 # Hardware adaptation (3 x RTX Pro 6000, driver cgroup 1T): TRAIN_BATCH_SIZE 48 (paper 96), ROLLOUT_N default 8 (paper 8),
 # steps default 130 (~1 epoch at batch 48; paper 70 steps x 96 = 1.08 epoch), save every 10. Override with env.
-# 用法: OFF_MODE=A|Ahm|Ahf [ROLLOUT_N=8] [TRAINER_TOTAL_TRAINING_STEPS=130] [RUN_SUFFIX=r2] bash scripts/train_official6k.sh
+# 用法: OFF_MODE=A|Ahm|Ahf|V0 [ROLLOUT_N=8] [TRAINER_TOTAL_TRAINING_STEPS=130] [RUN_SUFFIX=r2] bash scripts/train_official6k.sh
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OFF_MODE="${OFF_MODE:-A}"
-case "$OFF_MODE" in A) TAG=off6k_A; HIST=False; HMODE=mean;; Ahm) TAG=off6k_Ahm; HIST=True; HMODE=mean;; Ahf) TAG=off6k_Ahf; HIST=True; HMODE=hf;; *) echo "OFF_MODE must be A|Ahm|Ahf"; exit 1;; esac
+NULLM=mean_color
+case "$OFF_MODE" in A) TAG=off6k_A; HIST=False; HMODE=mean;; Ahm) TAG=off6k_Ahm; HIST=True; HMODE=mean;; Ahf) TAG=off6k_Ahf; HIST=True; HMODE=hf;;
+  V0) TAG=off6k_V0; HIST=False; HMODE=mean; NULLM=null;;   # Vision-OPD (no null, no tilt) on the official 6K data
+  *) echo "OFF_MODE must be A|Ahm|Ahf|V0"; exit 1;; esac
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-${TAG}${RUN_SUFFIX:-}}"
 export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-/scratch/nkw3mr/Vision-OPD/data/train.parquet}"
 export TEACHER_MODEL_SOURCE=legacy TEACHER_REGULARIZATION=frozen TEACHER_UPDATE_RATE=0.0
-export COUNTERFACTUAL_NULL_MODE=mean_color COUNTERFACTUAL_EXTRAPOLATION_BETA="${AHA_BETA:-4.0}"
+export COUNTERFACTUAL_NULL_MODE=$NULLM COUNTERFACTUAL_EXTRAPOLATION_BETA="${AHA_BETA:-4.0}"
+[ "$OFF_MODE" = V0 ] && export COUNTERFACTUAL_EXTRAPOLATION_BETA=0.0 VOPD_FORBID_NULL=1
 export ALPHA=0.5 LR="${LR:-2e-6}" MAX_PROMPT_LENGTH=8192 MAX_RESPONSE_LENGTH=1024 DATA_SEED=42
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-48}" PPO_MIMI_BATCH_SIZE="${PPO_MIMI_BATCH_SIZE:-48}" ROLLOUT_N="${ROLLOUT_N:-8}"
 export TRAINER_N_GPUS_PER_NODE="${TRAINER_N_GPUS_PER_NODE:-3}" TRAINER_NNODES=1

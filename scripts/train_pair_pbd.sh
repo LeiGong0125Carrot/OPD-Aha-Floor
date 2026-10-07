@@ -9,13 +9,14 @@
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PBD_MODE="${PBD_MODE:-keep}"
-PBD_VIEW="${PBD_VIEW:-hide}"   # hide: ONE hide image as the privileged view (train_6k_armA_hide.parquet, teacher_prompt '<image>\n{q}', no hint)
+PBD_VIEW="${PBD_VIEW:-hide}"   # off6k: official 6K data (swap_images). hide: ONE hide image as the privileged view (train_6k_armA_hide.parquet, teacher_prompt '<image>\n{q}', no hint)
                                # crop: pair data, continuation under [full][crop] (crop_append); scoring teacher keeps teacher_prompt
 case "$PBD_MODE" in keep) T=PBDk;; replace) T=PBDr;; *) echo "PBD_MODE must be keep|replace"; exit 1;; esac
 case "$PBD_VIEW" in
   hide) T="${T}H"; DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6k_armA_hide.parquet; CONT_VIEW=teacher_prompt;;
   crop) DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet; CONT_VIEW=crop_append;;
-  *) echo "PBD_VIEW must be hide|crop"; exit 1;;
+  off6k) T="${T}O"; DEF_FILE=/scratch/nkw3mr/Vision-OPD/data/train.parquet; CONT_VIEW=swap_images;;   # official Vision-OPD-6K: red-box student + hint, single crop teacher
+  *) echo "PBD_VIEW must be hide|crop|off6k"; exit 1;;
 esac
 export MODEL_PATH="${MODEL_PATH:-Qwen/Qwen3.5-4B}"
 export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-pair_${T}${RUN_SUFFIX:-}_6karmA}"
