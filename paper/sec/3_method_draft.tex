@@ -1,0 +1,152 @@
+\section{Method}
+
+\subsection{Overview}
+
+We study on-policy distillation for visual reasoning by explicitly separating visual perception from downstream reasoning.
+Our central idea is to evaluate the same frozen Teacher under two different information pathways while keeping the Student-generated reasoning state fixed.
+
+The Student always operates under the standard inference condition.
+Given an image $I$ and a textual query $Q$, it generates an on-policy response
+\[
+\tau_S=(y_1,\ldots,y_T)
+\sim
+p_\theta(\cdot\mid I,Q).
+\]
+At token position $t$, we denote the Student-generated prefix as
+\[
+h_t=(Q,y_{<t}).
+\]
+
+For each Student-visited state $h_t$, we query the same frozen Teacher from two views.
+In the first view, the Teacher receives the raw image and must jointly perform visual perception and reasoning.
+In the second view, the raw image is removed and replaced by ground-truth structured visual evidence, such as object identities and bounding boxes.
+This second view removes the need to recover the relevant scene geometry from pixels and allows the Teacher to reason directly from an externally resolved perceptual representation.
+
+We therefore obtain
+\[
+p_t^{\mathrm{vis}}
+=
+p_\phi(\cdot\mid I,Q,y_{<t}),
+\]
+and
+\[
+p_t^{\mathrm{str}}
+=
+p_\phi(\cdot\mid E^*,Q,y_{<t}),
+\]
+where $E^*$ denotes the training-only structured evidence.
+
+The Teacher parameters, query, Student-generated prefix, and prediction position are identical across the two evaluations.
+Only the information pathway differs.
+This construction lets us compare reasoning under endogenous visual perception with reasoning under externally resolved structured evidence.
+
+\subsection{Decoupling Perception and Reasoning}
+
+Standard visual reasoning couples two processes inside the same model:
+\[
+I
+\rightarrow
+\text{perception}
+\rightarrow
+\text{reasoning}.
+\]
+
+Errors in the final prediction may therefore arise from either stage.
+A model may fail because it extracts an incorrect perceptual state from the image, or because it reasons incorrectly even when the relevant perceptual information is available.
+
+To separate these effects, we introduce a structured-evidence view in which the perceptual state is externally specified:
+\[
+E^*
+\rightarrow
+\text{reasoning}.
+\]
+
+In our setting,
+\[
+E^*
+=
+\{(c_i,b_i)\}_{i=1}^{N},
+\]
+where $c_i$ denotes an object identity and $b_i$ its ground-truth bounding box.
+
+The structured-evidence branch is not treated as a different Teacher.
+Instead, it represents the same reasoner operating after the perceptual burden has been removed.
+Comparing the two views therefore provides a controlled way to study how the Teacher's reasoning behavior changes when visual grounding is externally resolved.
+
+We refer to this comparison as a \emph{perception-reasoning decoupling view}.
+
+\subsection{Reasoning Disagreement Across Information Views}
+
+The two Teacher views can produce different next-token distributions at the same Student state.
+We use this difference as a signal of how sensitive the current reasoning decision is to the perceptual pathway.
+
+Formally, we define
+\[
+d_t
+=
+D
+\left(
+p_t^{\mathrm{str}},
+p_t^{\mathrm{vis}}
+\right),
+\]
+where $D(\cdot,\cdot)$ denotes a distributional discrepancy measure.
+
+When $d_t$ is small, the Teacher reaches similar reasoning preferences from the raw image and from the externally resolved structured evidence.
+When $d_t$ is large, the Teacher's reasoning changes substantially once the perceptual state is replaced by oracle information.
+
+Importantly, this discrepancy is not interpreted as a direct measurement of the Teacher's internal perception error.
+The structured representation $E^*$ is an external surrogate rather than the Teacher's latent perceptual state.
+Instead, $d_t$ indicates that the current reasoning decision is sensitive to whether task-relevant perception is resolved internally or supplied externally.
+
+\subsection{Decoupled On-Policy Distillation}
+
+The Student trajectory remains fully on-policy throughout training.
+The Student receives only $(I,Q)$ and visits the same states it would encounter at inference time.
+The structured evidence is used only to construct training-time Teacher supervision.
+
+At each Student-visited state, the raw-image Teacher view provides the Teacher's behavior under the standard visual pathway, while the structured-evidence view provides a reasoning reference under externally resolved perception.
+
+We use the relationship between these two distributions to determine how privileged reasoning supervision should be applied.
+At a high level, the method follows two principles.
+
+First, disagreement across the two Teacher views identifies reasoning states that are sensitive to perceptual grounding.
+Second, the structured-evidence view provides a target for how the same reasoner behaves once the relevant perceptual information has been resolved.
+
+The resulting training objective can be written abstractly as
+\[
+\mathcal{L}
+=
+\sum_{t=1}^{T}
+\mathcal{W}
+\left(
+p_t^{\mathrm{vis}},
+p_t^{\mathrm{str}}
+\right)
+\,
+\mathcal{D}
+\left(
+\mathcal{T}
+\left(
+p_t^{\mathrm{vis}},
+p_t^{\mathrm{str}}
+\right),
+p_t^S
+\right),
+\]
+where $\mathcal{W}$ determines the importance of each Student-visited state, $\mathcal{T}$ defines the Teacher supervision derived from the two information views, and $\mathcal{D}$ is the token-level distillation loss.
+
+This formulation intentionally leaves the weighting and target-construction mechanism general.
+The key methodological contribution is the decoupled Teacher evaluation itself: the same reasoner is queried under raw visual perception and under externally resolved structured perception at the same on-policy Student state.
+
+\subsection{Scope and Assumptions}
+
+The structured-evidence view provides a meaningful reasoning-only condition only when $E^*$ contains sufficient information for the task.
+
+We therefore focus on visual reasoning problems whose answer can be derived from object identity and geometric structure, including relative position, spatial ordering, containment, overlap, and relative size.
+
+For these tasks, bounding boxes provide a compact representation of the task-relevant perceptual state.
+In contrast, questions involving color, texture, fine-grained appearance, or other information not represented by bounding boxes cannot be fully resolved from $E^*$ alone.
+
+Our current formulation is therefore designed for geometry-sufficient visual reasoning.
+Extending the framework to broader multimodal reasoning would require richer structured evidence, such as object attributes, relations, or other task-specific perceptual annotations.
