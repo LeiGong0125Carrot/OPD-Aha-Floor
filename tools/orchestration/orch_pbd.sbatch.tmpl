@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH -p standard -c 1 --time=2-00:00:00 -J vopd-pbd__ARM__
+#SBATCH -o /sfs/weka/scratch/nkw3mr/Vision-OPD-setup/logs/orch_pbd__ARM__.out
+# P5 PBD arm __ARM__ (docs/proposals_2026-10-06/12, 13 §20) on hold __HOLD__: smoke 2 steps -> 51 steps (save 5)
+#   -> eval all ckpts on V* + ZoomBench (OPD-Aha eval code, rule-first + pure-llm) -> trim to V*/ZoomBench peaks.
+set -uo pipefail
+for v in $(env | grep -oE "^SLURM_[A-Z_]+"); do unset "$v"; done
+SETUP=/sfs/weka/scratch/nkw3mr/Vision-OPD-setup
+REPO=/scratch/nkw3mr/Vision-OPD/OPD-Aha-sup
+ARM=__ARM__; J=__HOLD__; SUF="__SUF__"; RATIO="__RATIO__"
+VIEW="${PBD_VIEW_ORCH:-hide}"; VS=""; [ "$VIEW" = hide ] && VS=H
+case "$ARM" in keep) TAG=pair_PBDk${VS}${SUF}_6karmA; SN=PBDk${VS}${SUF};; replace) TAG=pair_PBDr${VS}${SUF}_6karmA; SN=PBDr${VS}${SUF};; esac
+STOP=$SETUP/orch_pbd$ARM$SUF.stop
+say() { echo "[pbd$ARM$SUF $(date '+%m-%d %H:%M:%S')] $*"; }
+run_on() {
+  local log=$1; shift
+  srun --jobid=$J --ntasks=1 --cpus-per-task=8 bash -c "
+    source $SETUP/00_env.sh
+    export RAY_TMPDIR=/dev/shm/ray_pbd TMPDIR=/dev/shm/tmp_pbd
+    mkdir -p \"\$RAY_TMPDIR\" \"\$TMPDIR\"
+    unset SLURM_CPU_BIND SLURM_CPU_BIND_LIST SLURM_CPU_BIND_TYPE SLURM_CPU_BIND_VERBOSE
+    $*
+  " >> "$log" 2>&1
+}
+train_run() {   # $1 tag $2 steps $3 log-suffix
+  local tag=$1 steps=$2 sfx=$3
+  run_on "$SETUP/logs/train_$sfx.log" \
+    "cd $REPO && echo 'TRAIN ${sfx^^} START' \$(date) && \
+     PBD_MODE=$ARM PBD_VIEW=$VIEW EXPERIMENT_NAME_OVERRIDE=$tag TRAINER_TOTAL_TRAINING_STEPS=$steps TRAINER_SAVE_FREQ=5 \
+     TRAINER_N_GPUS_PER_NODE=3 ULYSSES_SP=1 TRAIN_BATCH_SIZE=48 PPO_MIMI_BATCH_SIZE=48 ROLLOUT_N=2 \
+     PBD_RATIO=$RATIO PBD_COVERAGE=0.5 PBD_LAMBDA=0.5 \
+     bash scripts/train_pair_pbd.sh trainer.resume_mode=auto; \
+     echo 'TRAIN ${sfx^^} EXIT='\$? \$(date)"
+  tail -5 "$SETUP/logs/train_$sfx.log" | grep -aq "TRAIN ${sfx^^} EXIT=0"
+}
+mech() { tr '\r' '\n' < "$SETUP/logs/train_$1.log" | grep -aoE '(pbd/branch_rows|pbd/branch_frac_of_batch|pbd/t_star_rel_mean|pbd/yT_len_mean|pbd/yT_trunc_frac|pbd/leak_row_frac|pbd/leak_tok_frac|pbd/scale|teacher_null_forward_frac|self_distillation/pbd_jsd_branch_sum|self_distillation/pbd_jsd_branch_cnt|self_distillation/pbd_jsd_v0_sum|self_distillation/pbd_jsd_v0_cnt|response_length/mean|timing_s/step|timing_s/pbd_gen):[0-9.e-]+' | awk -F: '{s[$1]+=$2;n[$1]++} END{for(k in s) printf "%s=%.4f ", k, s[k]/n[k]}'; }
+[ -f "$STOP" ] && { say stop; exit 0; }
+say "等待 hold $J RUNNING"
+while ! squeue -j $J -h -o %T 2>/dev/null | grep -q RUNNING; do [ -f "$STOP" ] && { say stop; exit 0; }; sleep 120; done
+g=""
+for try in 1 2 3; do
+  g=$(timeout 150 srun --jobid=$J --ntasks=1 bash -c 'echo $SLURM_GPUS_ON_NODE' 2>/dev/null | grep -E '^[0-9]+$' | tail -1)
+  [ "${g:-0}" -ge 3 ] && break; say "GPU 探测得到 '${g:-?}' (第 $try 次), 5 min 后重试"; sleep 300
+done
+say "hold $J 可见 GPU = ${g:-?}"; [ "${g:-0}" -ge 3 ] || { say "!! 拿不到 3 卡, 放弃"; exit 1; }
+DONE=$SETUP/orch_pbd$ARM$SUF.train_done
+if [ ! -f "$DONE" ] && [ ! -d "$REPO/checkpoints/$TAG" ]; then
+  say "冒烟 $ARM 2 步"
+  rm -rf "$REPO/checkpoints/pair_PBDsmoke${ARM}${SUF}_6karmA"; : > "$SETUP/logs/train_pbdsmoke${ARM}${SUF}.log"
+  train_run pair_PBDsmoke${ARM}${SUF}_6karmA 2 pbdsmoke${ARM}${SUF} || { say "!! 冒烟失败: $(grep -aiE 'Error|Killed|OOM|Traceback' $SETUP/logs/train_pbdsmoke${ARM}${SUF}.log | grep -v codecache | tail -3 | cut -c1-200)"; touch "$SETUP/orch_pbd$ARM$SUF.smoke_failed"; exit 1; }
+  m=$(mech pbdsmoke${ARM}${SUF}); say "  冒烟指标: $m"
+  echo "$m" | grep -qE "pbd/branch_rows=[1-9]" || { say "!! 冒烟: 无分支行"; touch "$SETUP/orch_pbd$ARM$SUF.smoke_failed"; exit 1; }
+  echo "$m" | grep -q "teacher_null_forward_frac=0.0000" || { say "!! 冒烟: null 前向不应运行"; touch "$SETUP/orch_pbd$ARM$SUF.smoke_failed"; exit 1; }
+  echo "$m" | grep -qE "self_distillation/pbd_jsd_branch_cnt=[1-9]" || { say "!! 冒烟: 分支行无损失 token"; touch "$SETUP/orch_pbd$ARM$SUF.smoke_failed"; exit 1; }
+  rm -rf "$REPO/checkpoints/pair_PBDsmoke${ARM}${SUF}_6karmA"; say "冒烟通过"
+fi
+[ -f "$STOP" ] && { say stop; exit 0; }
+# code-review gate (user rule): training starts only after $SETUP/orch_pbd.review_ok exists
+while [ ! -f "$SETUP/orch_pbd.review_ok" ]; do [ -f "$STOP" ] && { say stop; exit 0; }; say "等待 review 放行 (orch_pbd.review_ok)"; sleep 300; done
+if [ ! -f "$DONE" ]; then
+  say "训练 $TAG 51 步 (磁盘 $(df -BG --output=avail /sfs/weka/scratch/nkw3mr | tail -1 | tr -dc '0-9')G)"
+  train_run "$TAG" 51 "$TAG" || { say "!! 训练失败 (可重投续跑)"; exit 1; }
+  touch "$DONE"; say "  训练指标: $(mech $TAG)"
+fi
+say "评测 $TAG 全部 ckpt (V* + HR-Bench 4K/8K, rule-first + pure-llm; 用户 10-07: ZoomBench 不再关注)"
+run_on "$SETUP/logs/eval_$TAG.log" "TAG=$TAG SN=$SN BENCHES='vstar hrbench-4k hrbench-8k' bash $SETUP/eval_off6k_par.sh"
+grep -aq "EVAL_OFF6K EXIT=0" "$SETUP/logs/eval_$TAG.log" || { say "!! 评测未正常结束, 不裁剪"; exit 1; }
+sed -n '/^== 汇总/,/EVAL_OFF6K EXIT/p' "$SETUP/logs/eval_$TAG.log" | sed 's/^/  /'
+say "按 V*/HR-4K/HR-8K 峰值裁剪"; SN=$SN TRIM_BENCHES="vstar hrbench-4k hrbench-8k" bash "$SETUP/trim_off6k.sh" --apply "$TAG" 2>&1 | sed 's/^/  /'
+say "=== pbd $ARM$SUF 完成 (hold 保留) ==="

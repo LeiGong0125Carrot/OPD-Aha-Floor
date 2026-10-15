@@ -1,0 +1,218 @@
+tag: pair_PBDkHr2_6karmA
+short_name: PBDkHr2
+recorded_at: '2026-10-08T06:24:55'
+repo_head_at_record: 8b3823f
+ckpt_dir: /scratch/nkw3mr/Vision-OPD/OPD-Aha-sup/checkpoints/pair_PBDkHr2_6karmA
+note: ''
+config:
+  launcher_lines:
+  - 'pair_PBDkHr2_6karmA: PBD view=hide (cont_view=teacher_prompt, data=train_6k_armA_hide.parquet)
+    mode=keep ratio=0.10 coverage=0.5 lambda=0.5 maxcont=256 leak_mask=False (V0 base,
+    no null; seed42, pair)'
+  - '并行配置: n_gpus=3 ulysses_sp=1 rollout_n=2 lr=2e-6'
+  - 'Running: pair_PBDkHr2_6karmA'
+  - 'Teacher model source: legacy'
+  - 'Teacher regularization: frozen'
+  experiment_name: pair_PBDkHr2_6karmA
+  train_files:
+  - /sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6k_armA_hide.parquet
+  train_batch_size: 48
+  ppo_mini_batch_size: 48
+  save_freq: 5
+  seed: 42
+  alpha: 0.5
+  distillation_topk: 100
+  teacher_regularization: frozen
+  teacher_update_rate: 0.0
+  teacher_model_source: legacy
+  teacher_image_key: bbox_images
+  counterfactual_null_mode: null
+  counterfactual_null_scope: all
+  counterfactual_extrapolation_beta: 0.0
+  counterfactual_hist_adaptive_beta: false
+  counterfactual_hist_mode: cumsum
+  counterfactual_hist_kappa: 0.1
+  counterfactual_target_mode: tilt
+  max_response_length: 1024
+  max_prompt_length: 8192
+  pbd_enable: true
+  pbd_mode: keep
+  pbd_ratio: 0.1
+  pbd_coverage: 0.5
+  pbd_lambda: 0.5
+  pbd_max_cont_len: 256
+  pbd_leak_mask: false
+  pbd_cont_view: teacher_prompt
+  total_training_steps: 51
+  rollout_n: 2
+  actor_lr: 2e-6
+  train_start: Wed Oct 7 17:51:38 EDT 2026
+  train_exit: 0 Wed Oct 7 22:00:36 EDT 2026
+eval_protocol: OPD-Aha eval/infer.py + gpt-oss-120b judge (judge_qwenlm.py); peaks
+  by pure-llm
+results:
+  5:
+    vstar:
+      rule-first: 82.2
+      pure-llm: 82.2
+    zoombench:
+      rule-first: 49.82
+      pure-llm: 49.7
+    hrbench-4k:
+      rule-first: 84.75
+      pure-llm: 83.25
+    hrbench-8k:
+      rule-first: 80.25
+      pure-llm: 78.75
+  10:
+    vstar:
+      rule-first: 84.29
+      pure-llm: 83.25
+    zoombench:
+      rule-first: 49.59
+      pure-llm: 49.59
+    hrbench-4k:
+      rule-first: 85.5
+      pure-llm: 84.5
+    hrbench-8k:
+      rule-first: 78.75
+      pure-llm: 77.5
+  15:
+    vstar:
+      rule-first: 84.29
+      pure-llm: 84.29
+    zoombench:
+      rule-first: 50.41
+      pure-llm: 50.41
+    hrbench-4k:
+      rule-first: 85.88
+      pure-llm: 83.88
+    hrbench-8k:
+      rule-first: 79.12
+      pure-llm: 77.5
+  20:
+    vstar:
+      rule-first: 84.82
+      pure-llm: 84.82
+    zoombench:
+      rule-first: 51.24
+      pure-llm: 51.24
+    hrbench-4k:
+      rule-first: 83.62
+      pure-llm: 81.88
+    hrbench-8k:
+      rule-first: 82.38
+      pure-llm: 80.25
+  25:
+    vstar:
+      rule-first: 85.34
+      pure-llm: 85.34
+    zoombench:
+      rule-first: 54.08
+      pure-llm: 54.2
+    hrbench-4k:
+      rule-first: 83.38
+      pure-llm: 81.75
+    hrbench-8k:
+      rule-first: 79.88
+      pure-llm: 78.88
+  30:
+    vstar:
+      rule-first: 87.96
+      pure-llm: 87.43
+    zoombench:
+      rule-first: 53.85
+      pure-llm: 53.85
+    hrbench-4k:
+      rule-first: 85.5
+      pure-llm: 83.62
+    hrbench-8k:
+      rule-first: 81.5
+      pure-llm: 79.88
+  35:
+    vstar:
+      rule-first: 87.96
+      pure-llm: 87.96
+    zoombench:
+      rule-first: 53.49
+      pure-llm: 53.49
+    hrbench-4k:
+      rule-first: 85.0
+      pure-llm: 83.25
+    hrbench-8k:
+      rule-first: 80.0
+      pure-llm: 78.88
+  40:
+    vstar:
+      rule-first: 87.96
+      pure-llm: 87.96
+    zoombench:
+      rule-first: 53.14
+      pure-llm: 53.14
+    hrbench-4k:
+      rule-first: 84.0
+      pure-llm: 82.0
+    hrbench-8k:
+      rule-first: 78.88
+      pure-llm: 76.5
+  45:
+    vstar:
+      rule-first: 88.48
+      pure-llm: 87.96
+    zoombench:
+      rule-first: 55.03
+      pure-llm: 55.03
+    hrbench-4k:
+      rule-first: 84.0
+      pure-llm: 82.5
+    hrbench-8k:
+      rule-first: 79.75
+      pure-llm: 78.38
+  50:
+    vstar:
+      rule-first: 86.39
+      pure-llm: 85.86
+    zoombench:
+      rule-first: 53.14
+      pure-llm: 53.02
+    hrbench-4k:
+      rule-first: 84.0
+      pure-llm: 82.5
+    hrbench-8k:
+      rule-first: 80.38
+      pure-llm: 79.12
+  51:
+    vstar:
+      rule-first: 87.43
+      pure-llm: 86.91
+    zoombench:
+      rule-first: 55.15
+      pure-llm: 55.15
+    hrbench-4k:
+      rule-first: 84.12
+      pure-llm: 82.62
+    hrbench-8k:
+      rule-first: 79.62
+      pure-llm: 77.5
+peaks:
+  vstar:
+    step: 35
+    pure-llm: 87.96
+    rule-first: 87.96
+  zoombench:
+    step: 51
+    pure-llm: 55.15
+    rule-first: 55.15
+  hrbench-4k:
+    step: 10
+    pure-llm: 84.5
+    rule-first: 85.5
+  hrbench-8k:
+    step: 20
+    pure-llm: 80.25
+    rule-first: 82.38
+kept_ckpt:
+  step: 51
+  rule: ZoomBench best (pure-llm), user 10-07
+audit_note: training finished before the 10-08 disk-full event; evaluation resumed
+  (idempotent) after it

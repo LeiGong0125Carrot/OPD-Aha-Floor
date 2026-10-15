@@ -1,0 +1,252 @@
+tag: off6k_PBDk
+short_name: off6kPBDk
+recorded_at: '2026-10-10T20:26:41'
+repo_head_at_record: 8b3823f
+ckpt_dir: /scratch/nkw3mr/Vision-OPD/OPD-Aha-sup/checkpoints/off6k_PBDk
+note: ''
+config:
+  launcher_lines:
+  - 'off6k_PBDk: PBD view=off6k (cont_view=swap_images, data=train.parquet) mode=keep
+    ratio=0.10 coverage=0.5 lambda=0.5 maxcont=256 leak_mask=False (V0 base, no null;
+    seed42, pair)'
+  - '并行配置: n_gpus=3 ulysses_sp=1 rollout_n=8 lr=2e-6'
+  - 'Running: off6k_PBDk'
+  - 'Teacher model source: legacy'
+  - 'Teacher regularization: frozen'
+  experiment_name: off6k_PBDk
+  train_files:
+  - /scratch/nkw3mr/Vision-OPD/data/train.parquet
+  train_batch_size: 48
+  ppo_mini_batch_size: 48
+  save_freq: 10
+  seed: 42
+  alpha: 0.5
+  distillation_topk: 100
+  teacher_regularization: frozen
+  teacher_update_rate: 0.0
+  teacher_model_source: legacy
+  teacher_image_key: bbox_images
+  counterfactual_null_mode: null
+  counterfactual_null_scope: all
+  counterfactual_extrapolation_beta: 0.0
+  counterfactual_hist_adaptive_beta: false
+  counterfactual_hist_mode: cumsum
+  counterfactual_hist_kappa: 0.1
+  counterfactual_target_mode: tilt
+  max_response_length: 1024
+  max_prompt_length: 8192
+  pbd_enable: true
+  pbd_mode: keep
+  pbd_ratio: 0.1
+  pbd_coverage: 0.5
+  pbd_lambda: 0.5
+  pbd_max_cont_len: 256
+  pbd_leak_mask: false
+  pbd_cont_view: swap_images
+  total_training_steps: 130
+  rollout_n: 8
+  actor_lr: 2e-6
+  train_start: Thu Oct 8 02:26:43 EDT 2026
+  train_exit: 0 Fri Oct 9 04:38:36 EDT 2026
+eval_protocol: OPD-Aha eval/infer.py + gpt-oss-120b judge (judge_qwenlm.py); peaks
+  by pure-llm
+results:
+  10:
+    vstar:
+      rule-first: 82.72
+      pure-llm: 82.72
+    zoombench:
+      rule-first: 51.12
+      pure-llm: 51.12
+    hrbench-4k:
+      rule-first: 85.38
+      pure-llm: 83.75
+    hrbench-8k:
+      rule-first: 80.62
+      pure-llm: 78.5
+  20:
+    vstar:
+      rule-first: 84.29
+      pure-llm: 83.77
+    zoombench:
+      rule-first: 55.15
+      pure-llm: 55.15
+    hrbench-4k:
+      rule-first: 86.88
+      pure-llm: 86.0
+    hrbench-8k:
+      rule-first: 82.62
+      pure-llm: 81.5
+  30:
+    vstar:
+      rule-first: 89.01
+      pure-llm: 88.48
+    zoombench:
+      rule-first: 56.57
+      pure-llm: 56.57
+    hrbench-4k:
+      rule-first: 85.75
+      pure-llm: 84.5
+    hrbench-8k:
+      rule-first: 82.62
+      pure-llm: 81.38
+  40:
+    vstar:
+      rule-first: 90.05
+      pure-llm: 89.53
+    zoombench:
+      rule-first: 59.29
+      pure-llm: 59.29
+    hrbench-4k:
+      rule-first: 85.38
+      pure-llm: 84.88
+    hrbench-8k:
+      rule-first: 82.12
+      pure-llm: 81.5
+  50:
+    vstar:
+      rule-first: 90.58
+      pure-llm: 90.58
+    zoombench:
+      rule-first: 58.34
+      pure-llm: 58.34
+    hrbench-4k:
+      rule-first: 86.0
+      pure-llm: 85.12
+    hrbench-8k:
+      rule-first: 81.5
+      pure-llm: 80.25
+  60:
+    vstar:
+      rule-first: 92.15
+      pure-llm: 91.62
+    zoombench:
+      rule-first: 59.53
+      pure-llm: 59.53
+    hrbench-4k:
+      rule-first: 85.0
+      pure-llm: 84.12
+    hrbench-8k:
+      rule-first: 81.75
+      pure-llm: 80.62
+  70:
+    vstar:
+      rule-first: 92.67
+      pure-llm: 92.67
+    zoombench:
+      rule-first: 60.12
+      pure-llm: 60.12
+    hrbench-4k:
+      rule-first: 83.62
+      pure-llm: 82.75
+    hrbench-8k:
+      rule-first: 80.75
+      pure-llm: 80.5
+  80:
+    vstar:
+      rule-first: 91.62
+      pure-llm: 91.62
+    zoombench:
+      rule-first: 58.7
+      pure-llm: 58.7
+    hrbench-4k:
+      rule-first: 82.88
+      pure-llm: 82.38
+    hrbench-8k:
+      rule-first: 80.88
+      pure-llm: 79.5
+  90:
+    vstar:
+      rule-first: 91.62
+      pure-llm: 91.1
+    zoombench:
+      rule-first: 59.41
+      pure-llm: 59.41
+    hrbench-4k:
+      rule-first: 85.0
+      pure-llm: 84.0
+    hrbench-8k:
+      rule-first: 82.75
+      pure-llm: 81.0
+  100:
+    vstar:
+      rule-first: 90.58
+      pure-llm: 90.58
+    zoombench:
+      rule-first: 61.54
+      pure-llm: 61.54
+    hrbench-4k:
+      rule-first: 83.62
+      pure-llm: 82.25
+    hrbench-8k:
+      rule-first: 82.38
+      pure-llm: 80.88
+  110:
+    vstar:
+      rule-first: 90.05
+      pure-llm: 90.05
+    zoombench:
+      rule-first: 58.34
+      pure-llm: 58.34
+    hrbench-4k:
+      rule-first: 84.25
+      pure-llm: 83.0
+    hrbench-8k:
+      rule-first: 80.0
+      pure-llm: 78.38
+  120:
+    vstar:
+      rule-first: 90.58
+      pure-llm: 90.58
+    zoombench:
+      rule-first: 59.17
+      pure-llm: 59.05
+    hrbench-4k:
+      rule-first: 84.25
+      pure-llm: 82.88
+    hrbench-8k:
+      rule-first: 81.12
+      pure-llm: 79.25
+  130:
+    vstar:
+      rule-first: 90.58
+      pure-llm: 90.58
+    zoombench:
+      rule-first: 59.88
+      pure-llm: 59.64
+    hrbench-4k:
+      rule-first: 84.62
+      pure-llm: 83.5
+    hrbench-8k:
+      rule-first: 81.12
+      pure-llm: 79.25
+peaks:
+  vstar:
+    step: 70
+    pure-llm: 92.67
+    rule-first: 92.67
+  zoombench:
+    step: 100
+    pure-llm: 61.54
+    rule-first: 61.54
+  hrbench-4k:
+    step: 20
+    pure-llm: 86.0
+    rule-first: 86.88
+  hrbench-8k:
+    step: 20
+    pure-llm: 81.5
+    rule-first: 82.62
+kept_ckpt:
+  step: 100
+  rule: ZoomBench best (pure-llm), user 10-07
+code_commit_at_train: 8b3823f (training start 2026-10-08 02:26 EDT; 01:54-01:59 integration
+  smoke on the same commit)
+audit_note: '(1) PBD forces a single on-policy mini-batch, so the vopd IS ratio is
+  1; the same-data V0/Ahm baselines reuse vLLM log-probs as old_log_probs (ratio pi_FSDP/pi_vLLM,
+  clipped at 2, log-ppl diff ~0.005). (2) Official answers are short (~70 tokens):
+  nominal ratio 0.10 gives a mean prefix of 7.7 tokens and mean t*/T = 0.24 after
+  word-boundary snapping and the minimum length. (3) ~4% of y^T hit the 256-token
+  cap; branch missing-answer 3.4% vs parent 0.8% (monitor). (4) evaluation was interrupted
+  when the hold was cancelled 10-09 12:02 and resumed idempotently on a new hold with
+  the 3-GPU parallel evaluator.'

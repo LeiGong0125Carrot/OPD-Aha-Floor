@@ -1,0 +1,109 @@
+tag: StdOPD-region-Qwen3.5-4B-6karmA-r2
+short_name: V0hr2
+recorded_at: '2026-10-07T19:04:14'
+repo_head_at_record: 8b3823f
+ckpt_dir: /sfs/weka/scratch/nkw3mr/Vision-OPD/checkpoints/StdOPD-region-Qwen3.5-4B-6karmA-r2
+note: V0-hide baseline (same data as PBD hide arms); teacher_regularization=ema with
+  update_rate 0 = frozen
+config:
+  launcher_lines:
+  - 'Running: StdOPD-region-Qwen3.5-4B-6karmA-r2  (state_adaptive=False)'
+  - 'Teacher: frozen init copy (source=legacy, update_rate=0.0)'
+  - "2026-09-27 06:14:03,384\tINFO worker.py:1998 -- Started a local Ray instance.\
+    \ View the dashboard at \e[1m\e[32mhttp://127.0.0.1:8265 \e[39m\e[22m"
+  - '/sfs/weka/scratch/nkw3mr/envs/vision-opd/lib/python3.12/site-packages/ray/_private/worker.py:2046:
+    FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator
+    visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this
+    behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0'
+  - warnings.warn(
+  experiment_name: StdOPD-region-Qwen3.5-4B-6karmA-r2
+  train_files:
+  - /sfs/weka/scratch/nkw3mr/Vision-OPD/data/TreeVGR-RL-37K/train_6k_armA_hide.parquet
+  train_batch_size: 48
+  ppo_mini_batch_size: 48
+  save_freq: 5
+  seed: 42
+  alpha: 0.5
+  distillation_topk: 100
+  teacher_regularization: ema
+  teacher_update_rate: 0.0
+  teacher_model_source: legacy
+  teacher_image_key: bbox_images
+  max_response_length: 1024
+  max_prompt_length: 8192
+  total_training_steps: null
+  train_start: Sun Sep 27 06:13:37 EDT 2026
+  train_exit: 0 Sun Sep 27 08:05:40 EDT 2026
+eval_protocol: OPD-Aha eval/infer.py + gpt-oss-120b judge (judge_qwenlm.py); peaks
+  by pure-llm
+results:
+  30:
+    vstar:
+      rule-first: 87.96
+      pure-llm: 87.43
+    zoombench:
+      rule-first: 53.49
+      pure-llm: 53.49
+    hrbench-4k:
+      rule-first: 84.0
+      pure-llm: 82.25
+    hrbench-8k:
+      rule-first: 79.75
+      pure-llm: 78.5
+  40:
+    vstar:
+      rule-first: 87.43
+      pure-llm: 87.43
+    zoombench:
+      rule-first: 54.08
+      pure-llm: 54.08
+    hrbench-4k:
+      rule-first: 82.75
+      pure-llm: 81.5
+    hrbench-8k:
+      rule-first: 78.25
+      pure-llm: 76.5
+  50:
+    vstar:
+      rule-first: 88.48
+      pure-llm: 87.96
+    zoombench:
+      rule-first: 54.44
+      pure-llm: 54.44
+    hrbench-4k:
+      rule-first: 83.5
+      pure-llm: 81.62
+    hrbench-8k:
+      rule-first: 79.88
+      pure-llm: 78.62
+  51:
+    vstar:
+      rule-first: 86.91
+      pure-llm: 86.91
+    zoombench:
+      rule-first: 54.2
+      pure-llm: 54.2
+    hrbench-4k:
+      rule-first: 83.5
+      pure-llm: 82.0
+    hrbench-8k:
+      rule-first: 78.62
+      pure-llm: 76.62
+peaks:
+  vstar:
+    step: 50
+    pure-llm: 87.96
+    rule-first: 88.48
+  zoombench:
+    step: 50
+    pure-llm: 54.44
+    rule-first: 54.44
+  hrbench-4k:
+    step: 30
+    pure-llm: 82.25
+    rule-first: 84.0
+  hrbench-8k:
+    step: 50
+    pure-llm: 78.62
+    rule-first: 79.88
+kept_ckpt: null
