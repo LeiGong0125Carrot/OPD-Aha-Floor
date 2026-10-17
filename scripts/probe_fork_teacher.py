@@ -7,6 +7,8 @@ the teacher's OWN trajectories (generated from t=0 under the privileged view) ar
 
 Pair data (train_6karmA_pair): student view = [full] + q (no box, no hint), teacher view = teacher_prompt [full][crop],
 null view = [full][mean-colour crop] (A's null_scope=last). Same frozen base model for all three.
+--setting off6k (official Vision-OPD-6K): student = red-box image + hint text; teacher = same text with the crop instead;
+null = same text with a mean-colour image of the crop's size.
 
 part=gen     (vLLM)  per row: n_s student-view samples + n_t teacher-view samples (temperature 1.0, seed 42)
 part=score   (HF)    every trajectory scored under S / T / N: realized log-probs, TV(S,T) and TV(T,N) on the student top-K + tail
@@ -24,7 +26,8 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
-PARQUET = "/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet"
+PARQUETS = {"pair": "/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet",
+            "off6k": "/scratch/nkw3mr/Vision-OPD/data/train.parquet"}   # off6k: official Vision-OPD-6K (no teacher_prompt column)
 MODEL = "Qwen/Qwen3.5-4B"
 TPL = os.path.join(ROOT, "chat_templates/perception_chat_template_qwen35.jinja")
 LEAK = re.compile(r"zoom|close-up|closeup|crop|enlarg|magnif|inset|second image|zoomed", re.I)
@@ -70,10 +73,30 @@ def entropy_matched_baseline(vals, ent, fork_ent, n_bins=10):
 
 
 # ------------------------------------------------------------------------------------------------ gen / score (GPU)
+def teacher_content(row, setting):
+    """Teacher text template. pair: teacher_prompt ([full][crop]); off6k: the STUDENT text (incl. the red-box hint) with its image
+    swapped for the crop -- RayPPOTrainer._swap_images_in_messages, as used by the scoring teacher on data without teacher_prompt."""
+    return row["teacher_prompt"][0]["content"] if setting == "pair" else row["prompt"][0]["content"]
+
+
+def view_images(P, row, which):
+    """T: teacher images (raw PIL, HF-processor path as the training teacher); N: same with the LAST image mean-coloured
+    (A's null_scope=last; off6k has a single crop, so N = the hint text + a blank image of the crop's size)."""
+    imgs = [P.load_rgb(d["path"]) for d in row["bbox_images"]]
+    return imgs if which == "T" else P.mean_colour_last(imgs)
+
+
+def encode_view(P, views, row, which, setting):
+    if which == "S":
+        return views.student(row)
+    imgs = view_images(P, row, which)
+    return views.encode(P.messages_from_template(teacher_content(row, setting), imgs), imgs)
+
+
 def load_items(args, processor):
     import probe_layer_prior as P
     from verl.utils.dataset.vision_utils import process_image
-    rows = P.load_rows(PARQUET, args.n, 42)
+    rows = P.load_rows(PARQUETS[args.setting], args.n, 42)
     ps = processor.image_processor.patch_size          # training: process_vision_info(image_patch_size=16) for the student
     return rows, P, ps, process_image
 
@@ -85,15 +108,15 @@ def part_gen(args, processor):
     views = P.Views(processor, 10240, ps)
     for r in rows:
         try:
-            views.student(r); views.real(r); views.null(r)
-        except RuntimeError as e:                       # prompt >= 10240 tokens: skip the row (same limit in score)
+            for w in "STN": encode_view(P, views, r, w, args.setting)
+        except (RuntimeError, ValueError) as e:         # prompt >= 10240 tokens or image/placeholder mismatch: skip the row
             print(f"[gen] skip row {r['_row']}: {e}", flush=True); continue
         kept.append(r)
         imgs_s = [process_image(dict(d), image_patch_size=ps) for d in r["images"]]
-        imgs_t = [P.load_rgb(d["path"]) for d in r["bbox_images"]]
+        imgs_t = view_images(P, r, "T")
         reqS.append({"prompt": processor.apply_chat_template(P.messages_from_template(r["prompt"][0]["content"], imgs_s), tokenize=False, add_generation_prompt=True),
                      "multi_modal_data": {"image": imgs_s}})
-        reqT.append({"prompt": processor.apply_chat_template(P.messages_from_template(r["teacher_prompt"][0]["content"], imgs_t), tokenize=False, add_generation_prompt=True),
+        reqT.append({"prompt": processor.apply_chat_template(P.messages_from_template(teacher_content(r, args.setting), imgs_t), tokenize=False, add_generation_prompt=True),
                      "multi_modal_data": {"image": imgs_t}})
     llm = LLM(model=MODEL, gpu_memory_utilization=0.6, max_model_len=12288, limit_mm_per_prompt={"image": 2},
               trust_remote_code=True, enable_prefix_caching=True, dtype="bfloat16")
@@ -122,7 +145,7 @@ def part_score(args, processor):
     pos = collections.defaultdict(list); forks = []; answers = []
     for gi, g in enumerate(gen):
         row = rows_by[g["row"]]
-        enc = {"S": views.student(row), "T": views.real(row), "N": views.null(row)}
+        enc = {w: encode_view(P, views, row, w, args.setting) for w in "STN"}
         trajs = [("S", i, y) for i, y in enumerate(g["S"])] + [("T", j, y) for j, y in enumerate(g["T"])]
         specs = fork_pairs(trajs)
         queries = collections.defaultdict(list)                       # (kind, idx) -> spec indices scored on that trajectory
@@ -274,6 +297,7 @@ def part_analyze(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--part", choices=["gen", "score", "analyze"], required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--setting", choices=["pair", "off6k"], default="pair")
     ap.add_argument("--n", type=int, default=200); ap.add_argument("--n_s", type=int, default=4); ap.add_argument("--n_t", type=int, default=4)
     ap.add_argument("--max_tokens", type=int, default=1024); ap.add_argument("--K", type=int, default=100)
     args = ap.parse_args()
