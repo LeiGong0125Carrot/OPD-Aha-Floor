@@ -60,8 +60,12 @@ def main():
     al = [json.load(open(f)) for f in glob.glob(os.path.join(D, "agentloop_*.json"))]
     check("agent-loop dumps present (>= branch rows, incl. padding)", len(al) >= len(rows), f"{len(al)} >= {len(rows)}")
     n_gen = T.get("teacher_images_per_row", 2) if T.get("cont_view", "crop_append") in ("teacher_prompt", "swap_images") else 2
+    # teacher_prompt views may interleave text between images (pair: '<image>\nZoomed-in view ...: <image>\n{q}')
+    interleave = T.get("cont_view", "crop_append") == "teacher_prompt"
     for x in al:
-        check(f"[gen {x['uid'][:8]}] continuation view = {n_gen} image(s), images before text", x["n_images"] == n_gen and x["content_types"][:n_gen] == ["image"] * n_gen and x["content_types"][-1] == "text", str(x["content_types"]))
+        ct = x["content_types"]
+        lay_ok = (ct[0] == "image" and ct.count("image") == n_gen) if interleave else ct[:n_gen] == ["image"] * n_gen
+        check(f"[gen {x['uid'][:8]}] continuation view = {n_gen} image(s), {'image-first' if interleave else 'images before text'}", x["n_images"] == n_gen and lay_ok and ct[-1] == "text", str(ct))
         check(f"[gen {x['uid'][:8]}] prompt tail == prefix ids; final = template + prefix", x["prompt_tail_equals_prefix"] and x["final_prompt_len"] == x["prompt_len_before_prefix"] + x["prefix_len"])
         check(f"[gen {x['uid'][:8]}] continuation <= cap", x["cont_len"] <= x["max_cont"])
     # match continuation ids between agent loop and trainer rows
