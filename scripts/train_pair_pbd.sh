@@ -10,11 +10,11 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PBD_MODE="${PBD_MODE:-keep}"
 PBD_VIEW="${PBD_VIEW:-hide}"   # off6k: official 6K data (swap_images). hide: ONE hide image as the privileged view (train_6k_armA_hide.parquet, teacher_prompt '<image>\n{q}', no hint)
-                               # crop: pair data, continuation under [full][crop] (crop_append); scoring teacher keeps teacher_prompt
+                               # crop: pair data, continuation under teacher_prompt + [full][crop] (= scoring teacher view, cont_view=teacher_prompt)
 case "$PBD_MODE" in keep) T=PBDk;; replace) T=PBDr;; *) echo "PBD_MODE must be keep|replace"; exit 1;; esac
 case "$PBD_VIEW" in
   hide) T="${T}H"; DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6k_armA_hide.parquet; CONT_VIEW=teacher_prompt;;
-  crop) DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet; CONT_VIEW=crop_append;;
+  crop) DEF_FILE=/sfs/weka/scratch/nkw3mr/Vision-OPD-OPSA/data/TreeVGR-RL-37K/train_6karmA_pair.parquet; CONT_VIEW=teacher_prompt;;   # 10-17: continue under the exact view the frozen teacher scores (as hide/off6k); crop_append (no "Zoomed-in view" phrase) stays in code
   off6k) T="${T}O"; DEF_FILE=/scratch/nkw3mr/Vision-OPD/data/train.parquet; CONT_VIEW=swap_images;;   # official Vision-OPD-6K: red-box student + hint, single crop teacher
   *) echo "PBD_VIEW must be hide|crop|off6k"; exit 1;;
 esac
