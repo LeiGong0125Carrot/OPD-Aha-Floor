@@ -162,19 +162,23 @@ def part_gen(args):
     from vllm import LLM, SamplingParams
     import probe_layer_prior as P
     processor = setup_processor(); ps = processor.image_processor.patch_size
-    rows = load_rows(args.n); reqs = []
-    for r in rows:
-        imgs = student_images(r, ps)
-        reqs.append({"prompt": processor.apply_chat_template(P.messages_from_template(r["prompt"][0]["content"], imgs), tokenize=False, add_generation_prompt=True),
-                     "multi_modal_data": {"image": imgs}})
+    rows = load_rows(args.n)
     llm = LLM(model=args.model, tokenizer=BASE, gpu_memory_utilization=0.6, max_model_len=12288, limit_mm_per_prompt={"image": 1},
               trust_remote_code=True, enable_prefix_caching=True, dtype="bfloat16")
-    outs = llm.generate(reqs, SamplingParams(n=args.n_samples, temperature=1.0, max_tokens=args.max_tokens, seed=42))
-    res = []
-    for r, o in zip(rows, outs):
-        texts = [x.text for x in o.outputs]
-        res.append(dict(row=r["_row"], group=r["images"][0]["path"], gt=r["_gt"], opts=r["_opts"], texts=texts,
-                        letters=[parse_letter(t, r["_opts"]) for t in texts], first_tok=[x.token_ids[0] if x.token_ids else None for x in o.outputs]))
+    sp = SamplingParams(n=args.n_samples, temperature=1.0, max_tokens=args.max_tokens, seed=42)   # per-request seed: chunking does not change samples
+    res, ch = [], max(1, args.gen_chunk)
+    for c0 in range(0, len(rows), ch):                 # 10-21: all 6241 high-res images at once OOM-killed the 200G host
+        reqs, chunk = [], rows[c0:c0 + ch]
+        for r in chunk:
+            imgs = student_images(r, ps)
+            reqs.append({"prompt": processor.apply_chat_template(P.messages_from_template(r["prompt"][0]["content"], imgs), tokenize=False, add_generation_prompt=True),
+                         "multi_modal_data": {"image": imgs}})
+        for r, o in zip(chunk, llm.generate(reqs, sp, use_tqdm=False)):    # keep only texts/letters; drop RequestOutputs per chunk
+            texts = [x.text for x in o.outputs]
+            res.append(dict(row=r["_row"], group=r["images"][0]["path"], gt=r["_gt"], opts=r["_opts"], texts=texts,
+                            letters=[parse_letter(t, r["_opts"]) for t in texts], first_tok=[x.token_ids[0] if x.token_ids else None for x in o.outputs]))
+        del reqs
+        print(f"[gen] {min(c0 + ch, len(rows))}/{len(rows)}", flush=True)
     os.makedirs(args.out, exist_ok=True); json.dump(res, open(os.path.join(args.out, "gen.json"), "w"))
     L = [x for g in res for x in g["letters"]]
     print(f"[gen] rows {len(res)}  samples {len(L)}  unparsed {np.mean([x is None for x in L]):.3f}  "
@@ -321,7 +325,7 @@ def main():
     ap.add_argument("--part", choices=["gen", "hidden", "analyze"], required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--model", default=BASE); ap.add_argument("--n", type=int, default=0)
     ap.add_argument("--n_samples", type=int, default=8); ap.add_argument("--max_tokens", type=int, default=512)
-    ap.add_argument("--layer_step", type=int, default=1)
+    ap.add_argument("--layer_step", type=int, default=1); ap.add_argument("--gen_chunk", type=int, default=400)
     args = ap.parse_args()
     {"gen": part_gen, "hidden": part_hidden, "analyze": part_analyze}[args.part](args)
 
