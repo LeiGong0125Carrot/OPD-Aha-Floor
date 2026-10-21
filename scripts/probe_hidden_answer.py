@@ -20,7 +20,8 @@ part=analyze (torch) 5-fold CV linear probes (folds grouped by image path; in of
                      gt  = GT letter (label)          maj = model's majority sampled letter (label-free)
                      acc = >=half of samples correct  det = all parsed samples agree (label-free)
                      baselines = model's own t=0 letter readout, GT-letter prior, chance; shuffled-label control;
-                     per-trajectory correctness AUC from per-prompt scores. Note: the best layer is picked from the same CV
+                     per-trajectory correctness AUC from per-prompt scores (GT probe p(GT), t0 readout, and the
+                     pre-generation correctness probe per position, vs the prompt-level oracle bracket LOO ~ in-sample). Note: the best layer is picked from the same CV
                      predictions it is reported on (max over layers, ~+1 pt optimism); the shuffled control runs at that layer.
 用法: python scripts/probe_hidden_answer.py --part gen|hidden|analyze --model <hf path> --out eval/probe_hidden/<id> [--n 0]
 """
@@ -314,8 +315,22 @@ def part_analyze(args):
     rate = np.array([np.mean(c) for c in corr])[m]; tr_lab = np.array(tr_lab)
     between = np.var(rate) / max(np.var(tr_lab.astype(float)), 1e-12)
     res["traj"] = dict(n=len(tr_lab), auc_probe=auc(s_probe, tr_lab), auc_out=auc(s_out, tr_lab), between_prompt_var_frac=float(between))
+    # user 10-21: is the trajectory's outcome decided before generation? score each trajectory by the pre-generation
+    # correctness probe (acc target, best layer per position; prompt hidden is shared, so the score is per prompt).
+    # Prompt-level ceiling, bracketed (oracle, uses outcomes): in-sample correct rate (optimistic: includes the trajectory
+    # itself) and leave-one-out rate of the other samples (pessimistic: ranks within-prompt pairs backwards). Not comparable
+    # to baseline acc_out_auc, which is prompt-level.
+    for pname in POSITIONS:
+        la = res["best"][f"{pname}/acc"]["layer"]; Pa = preds[(pname, la, "acc")]
+        res["traj"][f"auc_acc_{pname}"] = auc([Pa[i, 1] for i in np.where(m)[0] for _ in corr[i]], tr_lab)
+        res["traj"][f"acc_layer_{pname}"] = int(la)
+    loo = [(sum(corr[i]) - c) / max(len(corr[i]) - 1, 1) for i in np.where(m)[0] for c in corr[i]]
+    res["traj"]["auc_oracle_loo"] = auc(loo, tr_lab)
+    res["traj"]["auc_oracle_in"] = auc([np.mean(corr[i]) for i in np.where(m)[0] for _ in corr[i]], tr_lab)
     say(f"\n== 逐轨迹: {len(tr_lab)} 条, 正确率方差中题间占比 {between:.3f} (prompt 末 hidden 只能解释这一部分)")
     say(f"   轨迹正确 AUC: 探针 p(GT) {res['traj']['auc_probe']:.3f} | t0 输出 p(GT) {res['traj']['auc_out']:.3f}")
+    say("   生成前对错探针 (acc 目标最优层) 逐轨迹 AUC: " + " | ".join(f"{pn} 层{res['traj'][f'acc_layer_{pn}']} {res['traj'][f'auc_acc_{pn}']:.3f}" for pn in POSITIONS)
+        + f" | 题级上限区间 (oracle) LOO {res['traj']['auc_oracle_loo']:.3f} ~ 含自身 {res['traj']['auc_oracle_in']:.3f}")
     json.dump(res, open(os.path.join(args.out, "summary.json"), "w"), indent=1)
     say("\n[analyze] saved summary.json")
 

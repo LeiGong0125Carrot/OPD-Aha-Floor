@@ -69,6 +69,15 @@ check("analyze: shuffled control ~ chance", res["best"]["last/gt"]["shuffled"] <
 check("analyze: t0 readout baseline = sample accuracy (~0.6)", abs(res["baseline"]["gt_out"] - np.mean([g["letters"][0] == g["gt"] for g in gen])) < 1e-9)
 check("analyze: know-more on wrong rows (>0.9)", res["know_more/t0 输出 argmax≠GT"]["hit"] > 0.9)
 check("analyze: traj between-prompt var frac = 1 (all samples per prompt identical)", abs(res["traj"]["between_prompt_var_frac"] - 1) < 1e-9)
+tr = res["traj"]
+check("analyze: per-position acc-probe traj AUC + oracle reported", all(f"auc_acc_{p}" in tr for p in H.POSITIONS) and "auc_oracle_loo" in tr)
+check("analyze: oracle LOO AUC = 1 (samples within a prompt all agree)", abs(tr["auc_oracle_loo"] - 1) < 1e-9)
+check("analyze: in-sample oracle AUC = 1 too", abs(tr["auc_oracle_in"] - 1) < 1e-9)
+check(f"analyze: acc not planted -> traj AUC near chance ({tr['auc_acc_last']:.2f})", abs(tr["auc_acc_last"] - 0.5) < 0.15)
+# LOO arithmetic on mixed prompts [1,1,0,0] + [1,0,0,0]: LOO = [1/3,1/3,2/3,2/3] + [0,1/3,1/3,1/3]; correct {1/3,1/3,0} vs wrong {2/3,2/3,1/3,1/3,1/3}: 2x3 ties = 3 of 15 pairs
+corr_mix = [[1, 1, 0, 0], [1, 0, 0, 0]]; lab = [c for cc in corr_mix for c in cc]
+loo_mix = [(sum(cc) - c) / (len(cc) - 1) for cc in corr_mix for c in cc]
+check("LOO mixed-prompt AUC = hand value 3/15 (1/3-vs-1/3 ties only)", abs(H.auc(loo_mix, lab) - 3 / 15) < 1e-9)
 gd = [dict(gt="A", opts=list("ABCD"), letters=["A", None, None, None])]
 yd, _, _ = H.build_targets(gd)
 check("det excluded when fewer than half parsed", yd["det"][0] == -1)
