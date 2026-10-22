@@ -171,7 +171,8 @@ def part_gen(args):
     for c0 in range(0, len(rows), ch):                 # 10-21: all 6241 high-res images at once OOM-killed the 200G host
         reqs, chunk = [], rows[c0:c0 + ch]
         for r in chunk:
-            imgs = student_images(r, ps)
+            # teacher view (10-21): off6k scoring teacher = same text, image swapped for the crop (raw PIL, as _swap_images_in_messages)
+            imgs = student_images(r, ps) if args.view == "student" else [P.load_rgb(d["path"]) for d in r["bbox_images"]]
             reqs.append({"prompt": processor.apply_chat_template(P.messages_from_template(r["prompt"][0]["content"], imgs), tokenize=False, add_generation_prompt=True),
                          "multi_modal_data": {"image": imgs}})
         for r, o in zip(chunk, llm.generate(reqs, sp, use_tqdm=False)):    # keep only texts/letters; drop RequestOutputs per chunk
@@ -341,7 +342,10 @@ def main():
     ap.add_argument("--model", default=BASE); ap.add_argument("--n", type=int, default=0)
     ap.add_argument("--n_samples", type=int, default=8); ap.add_argument("--max_tokens", type=int, default=512)
     ap.add_argument("--layer_step", type=int, default=1); ap.add_argument("--gen_chunk", type=int, default=400)
+    ap.add_argument("--view", choices=["student", "teacher"], default="student")   # teacher: part=gen only (crop view, for probe_traj_within --part cross)
     args = ap.parse_args()
+    if args.view == "teacher" and args.part != "gen":
+        raise SystemExit("--view teacher is only defined for --part gen")
     {"gen": part_gen, "hidden": part_hidden, "analyze": part_analyze}[args.part](args)
 
 
