@@ -14,6 +14,7 @@ option text alone -- text priors / letter skew -- without the image).
 
 part=gen     (vLLM)  n samples per row at temperature 1.0 (seed 42), parsed to option letters
 part=hidden  (HF)    per row one image forward (vis + last) and one text-only forward (txt): hidden states of every layer
+                     (--view teacher: the image forward uses the crop view, as part=gen --view teacher; txt is view-independent)
                      boundary (fp32) + log-probs of the option-letter tokens at the last prompt token (the model's own t=0 readout)
 part=analyze (torch) 5-fold CV linear probes (folds grouped by image path; in off6k every row has its own image, so this is
                      plain 5-fold) per (position, layer) for four targets:
@@ -202,7 +203,11 @@ def part_hidden(args):
     H, LP, kept = None, [], []
     for i, r in enumerate(rows):
         try:
-            enc = views.student(r)
+            if args.view == "student":
+                enc = views.student(r)
+            else:   # crop view, identical to part_gen --view teacher (same text, image swapped for the crop)
+                imgs = [P.load_rgb(d["path"]) for d in r["bbox_images"]]
+                enc = views.encode(P.messages_from_template(r["prompt"][0]["content"], imgs), imgs)
         except (RuntimeError, ValueError) as e:
             print(f"[hidden] skip row {r['_row']}: {e}", flush=True); continue
         ids = enc["input_ids"][0]; vis = (ids == pad_id).nonzero()
@@ -342,10 +347,10 @@ def main():
     ap.add_argument("--model", default=BASE); ap.add_argument("--n", type=int, default=0)
     ap.add_argument("--n_samples", type=int, default=8); ap.add_argument("--max_tokens", type=int, default=512)
     ap.add_argument("--layer_step", type=int, default=1); ap.add_argument("--gen_chunk", type=int, default=400)
-    ap.add_argument("--view", choices=["student", "teacher"], default="student")   # teacher: part=gen only (crop view, for probe_traj_within --part cross)
+    ap.add_argument("--view", choices=["student", "teacher"], default="student")   # teacher: crop view (gen + hidden; 10-23 teacher stability probe)
     args = ap.parse_args()
-    if args.view == "teacher" and args.part != "gen":
-        raise SystemExit("--view teacher is only defined for --part gen")
+    if args.view == "teacher" and args.part == "analyze":
+        raise SystemExit("--view teacher: analyze is student-view only; use probe_teacher_stability.py")
     {"gen": part_gen, "hidden": part_hidden, "analyze": part_analyze}[args.part](args)
 
 
