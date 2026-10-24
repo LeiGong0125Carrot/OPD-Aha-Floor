@@ -131,6 +131,11 @@ class SelfDistillationConfig(BaseConfig):
     pbd_max_cont_len: int = 256      # continuation cap
     pbd_leak_mask: bool = False      # 13 §20.2(b): leak words are monitored, not masked (set True to mask them)
     pbd_cont_view: str = "teacher_prompt"   # swap_images (official 6K: student text, images -> bbox_images) | teacher_prompt (= the parquet's teacher view, e.g. ONE hide image, no hint) | crop_append ([student images][crop] + question)
+    # TSW (teacher_stability/tsw_initial_training_plan.md): question-level distillation weight from extra_info[tsw_key]
+    # (0/1 set membership): raw w = tsw_lambda for members, 1 otherwise; normalised over the global batch rows in the trainer.
+    tsw_enable: bool = False
+    tsw_key: str = "tsw_low25"       # tsw_low25 (probe-lowest 25%) | tsw_rand25 (matched random set)
+    tsw_lambda: float = 0.5          # 1 = equal weights, 0.5 = soft, 0 = hard
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -219,6 +224,13 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
             if self.teacher_target_mode not in (None, "legacy"):
                 raise ValueError("PBD requires teacher_target_mode=legacy")
+        if self.tsw_enable:
+            if not (0.0 <= self.tsw_lambda <= 1.0):
+                raise ValueError(f"self_distillation.tsw_lambda must be in [0,1], got {self.tsw_lambda}")
+            if not self.tsw_key:
+                raise ValueError("self_distillation.tsw_key must be set when tsw_enable")
+            if self.pbd_enable:
+                raise ValueError("TSW round 1 runs on the V0 base: pbd_enable must be False")
         if self.counterfactual_null_mode not in (None, "mean_color", "mismatch_crop"):
             raise ValueError(
                 "self_distillation.counterfactual_null_mode must be None, 'mean_color' or 'mismatch_crop', "

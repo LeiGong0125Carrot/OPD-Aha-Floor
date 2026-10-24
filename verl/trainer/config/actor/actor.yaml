@@ -167,6 +167,12 @@ self_distillation:
   pbd_leak_mask: false
   pbd_cont_view: teacher_prompt
 
+  # TSW: question-level weight from extra_info[tsw_key] (0/1 set): raw w = tsw_lambda for members, 1 otherwise,
+  # normalised to mean 1 over the global batch rows (teacher_stability/tsw_initial_training_plan.md)
+  tsw_enable: false
+  tsw_key: tsw_low25
+  tsw_lambda: 0.5
+
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 

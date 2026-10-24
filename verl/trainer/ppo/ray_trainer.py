@@ -1650,6 +1650,71 @@ class RayPPOTrainer:
         }), metrics
 
     # ------------------------------------------------------------------ P5 PBD (verl/utils/pbd.py)
+    @staticmethod
+    def _tsw_row_weights(member: np.ndarray, valid: np.ndarray, lam: float) -> tuple[np.ndarray, dict]:
+        """TSW (teacher_stability/tsw_initial_training_plan.md §4-5): raw w = lam for set members, 1 otherwise; normalised
+        over the valid (distilled) rows of the global batch so their mean is 1. The actor aggregates the distillation loss
+        per row (ppo_micro_batch_size_per_gpu=1: token-mean within a row, rows averaged by gradient accumulation), so a
+        row-level mean of 1 keeps the step's overall distillation strength and makes all-ones weights a no-op.
+        Rows outside `valid` get 0 (they carry no distillation loss anyway)."""
+        member = np.asarray(member, dtype=bool); valid = np.asarray(valid, dtype=bool)
+        raw = np.where(member, float(lam), 1.0)
+        z = float(raw[valid].sum())
+        if valid.any() and z <= 0.0:
+            raise ValueError("TSW: every distilled row in this batch has weight 0 (all in the zero-weight set)")
+        coef = float(valid.sum()) / z if valid.any() else 0.0
+        w = np.where(valid, raw * coef, 0.0).astype(np.float32)
+        wv = w[valid]
+        return w, {
+            "tsw/member_row_frac": float(member[valid].mean()) if valid.any() else 0.0,
+            "tsw/raw_weight_mean": float(raw[valid].mean()) if valid.any() else 0.0,
+            "tsw/norm_coef": coef,
+            "tsw/weight_mean": float(wv.mean()) if valid.any() else 0.0,
+            "tsw/weight_std": float(wv.std()) if valid.any() else 0.0,
+            "tsw/zero_weight_rows": float((wv == 0).sum()),
+        }
+
+    def _maybe_attach_tsw_weight(self, batch: DataProto) -> dict:
+        """Write batch.batch['tsw_weight'] [B] from extra_info[tsw_key] (0/1) when self_distillation.tsw_enable."""
+        sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if sd is None or not bool(sd.get("tsw_enable", False)):
+            return {}
+        # mirror the dataclass checks at runtime (hydra DictConfig skips __post_init__)
+        lam, key = float(sd.get("tsw_lambda", 0.5)), str(sd.get("tsw_key", "tsw_low25"))
+        if not (0.0 <= lam <= 1.0): raise ValueError(f"tsw_lambda must be in [0,1], got {lam}")
+        if bool(sd.get("pbd_enable", False)): raise ValueError("TSW round 1 runs on the V0 base: pbd_enable must be False")
+        if self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla") != "vopd":
+            raise ValueError("tsw_enable requires policy_loss.loss_mode=vopd")
+        if self.config.actor_rollout_ref.actor.get("use_dynamic_bsz", False): raise ValueError("TSW requires use_dynamic_bsz=False")
+        if int(self.config.actor_rollout_ref.actor.get("ppo_epochs", 1)) != 1: raise ValueError("TSW requires ppo_epochs=1")
+        if getattr(self, "use_legacy_worker_impl", "auto") == "disable":   # new-engine losses.py never reads tsw_weight
+            raise ValueError("TSW is implemented in the legacy dp_actor path only (use_legacy_worker_impl must not be 'disable')")
+        n_rows = len(batch)
+        mini_rows = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size) * int(self.config.actor_rollout_ref.rollout.n)
+        if mini_rows != n_rows:   # weights are normalised over the whole step batch = the single optimizer step
+            raise ValueError(f"TSW requires one mini-batch per step (ppo_mini_batch_size*n={mini_rows} != batch rows {n_rows})")
+        ei = batch.non_tensor_batch.get("extra_info", None)
+        if ei is None: raise ValueError("TSW: batch has no extra_info")
+        member = np.zeros(n_rows, dtype=bool)
+        for i in range(n_rows):
+            e = ei[i]
+            if not isinstance(e, dict) or key not in e or e[key] not in (0, 1):
+                raise ValueError(f"TSW: row {i} extra_info lacks a 0/1 '{key}' (use the train_tsw parquet)")
+            member[i] = bool(e[key])
+        if "self_distillation_mask" in batch.batch.keys():
+            valid = (batch.batch["self_distillation_mask"] > 0.5).cpu().numpy()
+        else:
+            valid = np.ones(n_rows, dtype=bool)
+        w, metrics = self._tsw_row_weights(member, valid, lam)
+        batch.batch["tsw_weight"] = torch.from_numpy(w)
+        if "response_mask" in batch.batch.keys():   # plan §5.3: token-weighted view of the same weights (logging only)
+            ntok = batch.batch["response_mask"].sum(-1).float().cpu().numpy() * valid
+            if ntok.sum() > 0:
+                metrics["tsw/weight_token_mean"] = float((w * ntok).sum() / ntok.sum())
+                metrics["tsw/member_token_frac"] = float((member * ntok).sum() / ntok.sum())
+        metrics["tsw/lambda"] = lam
+        return metrics
+
     def _pbd_cfg(self):
         sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         if sd is None or not bool(sd.get("pbd_enable", False)):
@@ -2902,6 +2967,7 @@ class RayPPOTrainer:
                             self_distillation_batch, self_distillation_metrics = self_distillation_data
                             batch = batch.union(self_distillation_batch)
                             metrics.update(self_distillation_metrics)
+                        metrics.update(self._maybe_attach_tsw_weight(batch))
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})

@@ -1109,6 +1109,7 @@ def compute_self_distillation_loss(
     pbd_is_branch: Optional[torch.Tensor] = None,
     pbd_scale: float = 1.0,          # V0 rows: N_total / N_v0
     pbd_scale_b: Optional[float] = None,   # branch rows: N_total / N_branch (defaults to pbd_scale)
+    tsw_weight: Optional[torch.Tensor] = None,   # [B] TSW question-level row weight, already normalised by the trainer
 ) -> tuple[torch.Tensor, dict[str, Any]]:
 
     metrics = {}
@@ -1910,6 +1911,12 @@ def compute_self_distillation_loss(
             _frac = (_kept / _tot).to(weighted_per_token_loss.dtype)
             _w = _w * ((1.0 - _isb) * _frac + _isb)
         weighted_per_token_loss = weighted_per_token_loss * _w
+    if tsw_weight is not None:
+        # TSW (teacher_stability/tsw_initial_training_plan.md §5): one weight per row; rows are token-mean aggregated
+        # and averaged over the step batch by the caller, and the trainer normalised the weights to row-mean 1.
+        if tsw_weight.dim() != 1 or tsw_weight.shape[0] != weighted_per_token_loss.shape[0]:
+            raise ValueError(f"tsw_weight must be [B]={weighted_per_token_loss.shape[0]}, got {tuple(tsw_weight.shape)}")
+        weighted_per_token_loss = weighted_per_token_loss * tsw_weight.to(weighted_per_token_loss.dtype).unsqueeze(1)
 
     valid_token_count = loss_mask.sum().clamp(min=1.0)
     if batch_num_tokens is None:
@@ -1925,6 +1932,10 @@ def compute_self_distillation_loss(
     else:
         metrics["self_distillation/self_distillation_mask.mean()"] = self_distillation_mask.float().mean().detach().item()
     metrics["self_distillation/num_distill_tokens"] = loss_mask.sum().detach().item()
+    if tsw_weight is not None:
+        _tw = tsw_weight.to(loss_mask.dtype)
+        metrics["self_distillation/tsw_row_weight"] = _tw.mean().detach().item()
+        metrics["self_distillation/tsw_zero_row_frac"] = (_tw == 0).float().mean().detach().item()
     if _pbd:
         _isb_row = pbd_is_branch.to(loss_mask.dtype).unsqueeze(1)
         _m_b = loss_mask * _isb_row

@@ -950,6 +950,9 @@ class DataParallelPPOActor(BasePPOActor):
         for _k in ("pbd_loss_mask", "pbd_is_branch"):
             if _k in data.batch.keys():
                 select_keys.append(_k)
+        # TSW question-level weight (normalised over the step batch in the trainer)
+        if "tsw_weight" in data.batch.keys():
+            select_keys.append("tsw_weight")
 
         has_multi_modal_inputs = self._has_non_empty_multi_modal_inputs(
             data.non_tensor_batch.get("multi_modal_inputs")
@@ -1295,6 +1298,7 @@ class DataParallelPPOActor(BasePPOActor):
                             pbd_is_branch=model_inputs.get("pbd_is_branch"),
                             pbd_scale=float(data.meta_info.get("pbd_scale", 1.0)),
                             pbd_scale_b=data.meta_info.get("pbd_scale_b", None),
+                            tsw_weight=model_inputs.get("tsw_weight"),
                         )
                         loss_compute_time = time.perf_counter() - loss_compute_start
                         stage_wall_time_totals["timing_s/update_actor/loss_compute"] += loss_compute_time
