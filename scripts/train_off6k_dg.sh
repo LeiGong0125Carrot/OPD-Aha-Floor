@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # DG (OPD-Aha-Floor teacher_stability/disagreement_gate_plan.md v2) on the off6k V0 base:
-#   DG_ARM=DG -> off6k_DGn2  (per step the top 25% prompts by g = TV(p_S0, p_T0) get one of n=2 rollouts replaced by the
-#                             offline frozen-teacher trajectory)
+#   DG_ARM=DG -> off6k_DGn2  (per step the top 25% prompts by g = TV(p_S0, p_T0) get one of n=2 rollouts replaced by a
+#                             fresh teacher-view generation of the rollout engine)
 #   DG_ARM=DR -> off6k_DRn2  (same number of prompts, chosen at random)
 # seed 42, rollout_n 2, lr 2e-6, 130 steps, save 10, all checkpoints kept (as TSW).
 # 用法: DG_ARM=DG|DR [RUN_SUFFIX=r2] [DG_FRAC=0.25] bash scripts/train_off6k_dg.sh
@@ -25,4 +25,5 @@ exec "${PROJECT_ROOT}/scripts/train_official6k.sh" \
     actor_rollout_ref.actor.self_distillation.dg_mode="${MODE}" \
     actor_rollout_ref.actor.self_distillation.dg_frac="${DG_FRAC:-0.25}" \
     actor_rollout_ref.actor.self_distillation.dg_topk=20 \
+    actor_rollout_ref.rollout.agent.agent_loop_config_path="${PROJECT_ROOT}/scripts/pbd_agent_loop.yaml" \
     "$@"

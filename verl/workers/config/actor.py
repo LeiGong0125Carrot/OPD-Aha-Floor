@@ -137,10 +137,10 @@ class SelfDistillationConfig(BaseConfig):
     tsw_key: str = "tsw_low25"       # tsw_low25 (probe-lowest 25%) | tsw_rand25 (matched random set)
     tsw_lambda: float = 0.5          # 1 = equal weights, 0.5 = soft, 0 = hard
     # DG (teacher_stability/disagreement_gate_plan.md v2): per step, replace one of the n rollouts of the top dg_frac prompts
-    # by g = TV(p_S0, p_T0) (gate) or of a matched random set (random) with the offline frozen-teacher trajectory.
+    # by g = TV(p_S0, p_T0) (gate) or of a matched random set (random) with a fresh teacher-view generation of the rollout engine.
     dg_enable: bool = False
     dg_mode: str = "gate"            # gate | random
-    dg_frac: float = 0.25            # fraction of the step's prompts that get a teacher trajectory
+    dg_frac: float = 0.25            # fraction of the step's prompts that get a teacher-view generation
     dg_topk: int = 20                # top-k logprobs of the first generated position (vLLM max_logprobs default 20)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False

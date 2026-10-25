@@ -5,8 +5,9 @@ LM-head distribution at the last prompt position restricted to the question's op
   p_T0: frozen base teacher (crop view) -> precomputed offline once (extra_info.dg_pT0).
   p_S0: current student (red-box full image + hint) -> top-k logprobs of the FIRST generated position, returned by the
         vLLM rollout that samples the student's response anyway (no extra forward).
-Per step the top-frac prompts by g (DG) or a matched random set (DR) get ONE of their n rollouts replaced by an offline
-frozen-teacher trajectory (teacher view, majority answer, samples 4..7; extra_info.dg_traj); the loss is the usual JSD.
+Per step the top-frac prompts by g (DG) or a matched random set (DR) get ONE of their n rollouts replaced by a FRESH
+generation of the rollout engine (current policy) under the teacher view (user 10-25: online, not offline samples); the
+frozen teacher scores it and the loss is the usual JSD.
 
 Pure helpers here (CPU-testable); the trainer glue is RayPPOTrainer._maybe_apply_dg.
 """
@@ -94,26 +95,31 @@ def select_prompts(g: np.ndarray, eligible: np.ndarray, frac: float, mode: str, 
     raise ValueError(f"dg_mode must be gate|random, got {mode!r}")
 
 
-def majority(letters) -> Optional[str]:
-    """Unique most frequent parsed letter (None on a tie for first or when nothing parsed); = probe_hidden_answer.majority."""
-    import collections
-    c = collections.Counter(x for x in letters if x is not None).most_common()
-    if not c or (len(c) > 1 and c[0][1] == c[1][1]):
-        return None
-    return c[0][0]
+def parse_letter(text: str, options: list):
+    """Option letter a response commits to, or None (= scripts/probe_hidden_answer.parse_letter; monitoring only).
+    Priority: <answer>X</answer>; a leading bare letter; the last 'answer is X' / 'option X'; else a unique standalone letter."""
+    cands = []
+    m = re.search(r"<answer>\s*\(?([A-F])(?![A-Za-z])", text)
+    if m: cands.append(m.group(1))
+    m = re.match(r"\s*\(?([A-F])(?:[).:,]|\s*$|\s*\n)", text)
+    if m: cands.append(m.group(1))
+    ms = re.findall(r"(?:answer|option)\s*(?:is|:)?\s*\**\(?([A-F])(?![A-Za-z])", text, re.I)
+    if ms: cands.append(ms[-1])
+    if not cands:
+        alone = set(re.findall(r"(?<![A-Za-z])([A-F])(?![A-Za-z]|\s+[a-z])", text))
+        if len(alone) == 1: cands.append(alone.pop())
+    for c in cands:
+        if c in options:
+            return c
+    return None
 
 
-def choose_teacher_traj(letters, texts, row: int, seed: int = 42, pool=(4, 5, 6, 7)) -> Optional[int]:
-    """Sample index of the offline teacher trajectory for one question: uniformly among the samples in `pool` whose parsed
-    answer equals the teacher's 8-sample majority letter (teacher self-consistency, no GT). None when there is no unique
-    majority or no pool sample carries it."""
-    maj = majority(letters)
-    if maj is None:
-        return None
-    cand = [s for s in pool if s < len(letters) and letters[s] == maj and texts[s] and texts[s].strip()]
-    if not cand:
-        return None
-    return int(np.random.default_rng([int(seed), int(row), 11]).choice(cand))
+DIRECT_RE = re.compile(r"\s*(?:<answer>\s*)?\**\(?[A-F](?:[).:,*]|\s*$|\s*\n|\s*</answer>)")
+
+
+def is_direct_answer(text: str) -> bool:
+    """Monitoring: the response opens with the option letter ('B. white', '**D**', '<answer>C</answer>') instead of reasoning."""
+    return DIRECT_RE.match(text or "") is not None
 
 
 def first_topk_from_vllm(position_logprobs) -> dict:

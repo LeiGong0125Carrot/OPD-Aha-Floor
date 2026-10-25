@@ -509,7 +509,7 @@ class AgentLoopWorker:
 
         # DG (verl/utils/dg.py): training rollouts also return the top-k of the first generated position
         _sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
-        if not validate and _sd is not None and bool(_sd.get("dg_enable", False)):
+        if not validate and not batch.meta_info.get("dg_no_topk", False) and _sd is not None and bool(_sd.get("dg_enable", False)):
             sampling_params["first_token_topk"] = int(_sd.get("dg_topk", 20))
 
         # by default, we assume it's a single turn agent
