@@ -1715,6 +1715,180 @@ class RayPPOTrainer:
         metrics["tsw/lambda"] = lam
         return metrics
 
+    # ------------------------------------------------------------------ DG (verl/utils/dg.py)
+    _DG_ROW_KEYS = ("prompts", "responses", "response_mask", "input_ids", "attention_mask", "position_ids")
+
+    def _dg_cfg(self):
+        """Self-distillation config when DG is on (runtime mirror of the dataclass guards: hydra DictConfig skips __post_init__)."""
+        sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
+        if sd is None or not bool(sd.get("dg_enable", False)):
+            return None
+        actor = self.config.actor_rollout_ref.actor
+        if str(sd.get("dg_mode", "gate")) not in ("gate", "random"): raise ValueError("dg_mode must be gate|random")
+        if not (0.0 < float(sd.get("dg_frac", 0.25)) <= 1.0): raise ValueError("dg_frac must be in (0,1]")
+        if not (1 <= int(sd.get("dg_topk", 20)) <= 20): raise ValueError("dg_topk must be in [1,20]")
+        if bool(sd.get("pbd_enable", False)) or bool(sd.get("tsw_enable", False)):
+            raise ValueError("DG runs on the V0 base: pbd_enable and tsw_enable must be False")
+        if sd.get("counterfactual_null_mode", None) not in (None, "null", "None"):
+            raise ValueError("DG runs on the V0 base: counterfactual_null_mode must be None")
+        if actor.policy_loss.get("loss_mode", "vanilla") != "vopd": raise ValueError("DG requires policy_loss.loss_mode=vopd")
+        if not self.async_rollout_mode: raise ValueError("DG reads the first-position top-k from the async (agent-loop) vLLM rollout")
+        if int(self.config.actor_rollout_ref.rollout.n) < 2: raise ValueError("DG replaces one of n>=2 rollouts per prompt")
+        # replaced rows carry rollout_log_probs of the STUDENT's sampled response; they must never enter the loss -> the update
+        # has to be on-policy (one mini-batch, one epoch: old_log_prob = log_prob.detach() in dp_actor) with no rollout IS.
+        if int(actor.get("ppo_epochs", 1)) != 1: raise ValueError("DG requires ppo_epochs=1")
+        if bool(actor.get("use_rollout_log_probs", False)): raise ValueError("DG requires actor.use_rollout_log_probs=False")
+        if actor.get("use_dynamic_bsz", False): raise ValueError("DG requires use_dynamic_bsz=False")
+        # rollout IS (token) is allowed as in the V0 control: on the reuse path old_log_probs IS the rollout_log_probs tensor
+        # (zeroed together on replaced rows) -> IS weight exp(0) = 1. Rejection sampling / batch normalisation / bypass are not.
+        # The reuse path itself is asserted per step in _maybe_apply_dg.
+        rc = self.config.algorithm.get("rollout_correction", None)
+        if rc is not None and (rc.get("bypass_mode", False) or rc.get("rollout_rs", None) or rc.get("rollout_is_batch_normalize", False)):
+            raise ValueError("DG is incompatible with rollout rejection sampling / IS batch normalisation / bypass mode")
+        if str(self.config.actor_rollout_ref.rollout.get("name", "vllm")) != "vllm":
+            raise ValueError("DG reads the first-position top-k from the vLLM server (rollout.name must be vllm)")
+        if getattr(self, "use_legacy_worker_impl", "auto") == "disable":
+            raise ValueError("DG is validated on the legacy dp_actor path only")
+        return sd
+
+    def _maybe_apply_dg(self, batch: DataProto) -> dict:
+        """After rollout (before reward / log-probs / teacher scoring): gate the step's prompts by g = TV(p_S0, p_T0) and
+        replace the LAST of the n rollouts of the selected prompts by the offline frozen-teacher trajectory (in place, so
+        the batch size and every later stage are those of V0). Adds batch.batch["dg_is_teacher"] [B]."""
+        from verl.utils import dg as G
+        from verl.utils import pbd as P
+        sd = self._dg_cfg()
+        if sd is None:
+            return {}
+        mode, frac, k = str(sd.get("dg_mode", "gate")), float(sd.get("dg_frac", 0.25)), int(sd.get("dg_topk", 20))
+        n_roll = int(self.config.actor_rollout_ref.rollout.n)
+        B = len(batch)
+        mini_rows = int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size) * n_roll
+        if mini_rows != B:
+            raise ValueError(f"DG requires one mini-batch per step (ppo_mini_batch_size*n={mini_rows} != batch rows {B})")
+        nt = batch.non_tensor_batch
+        for key in ("uid", "extra_info", "dg_first_topk"):
+            if key not in nt:
+                raise ValueError(f"DG: batch has no '{key}' (dg_first_topk comes from the single_turn_agent vLLM rollout)")
+        if "rollout_log_probs" in batch.batch.keys() and not should_reuse_rollout_log_probs_as_old_log_probs(self.config, batch):
+            # otherwise old_log_probs would be recomputed and rollout IS would compare them with the zeroed rollout log-probs
+            raise RuntimeError("DG requires the reuse-rollout-log-probs path (old_log_probs = rollout_log_probs)")
+        R = batch.batch["responses"].shape[1]; Lp = batch.batch["prompts"].shape[1]
+        for key in batch.batch.keys():   # every per-token tensor must be one we rebuild (or a known per-row extra)
+            t = batch.batch[key]
+            if key not in self._DG_ROW_KEYS + ("rollout_log_probs", "rm_scores") and t.dim() >= 2 and t.shape[-1] in (R, Lp + R):
+                raise RuntimeError(f"DG does not know how to rebuild batch tensor '{key}' {tuple(t.shape)} for a replaced row")
+        tok = self.tokenizer
+        if not hasattr(self, "_dg_letter_ids"):
+            ids = [tok.encode(L, add_special_tokens=False) for L in G.LETTERS]
+            if not all(len(x) == 1 for x in ids):
+                raise ValueError(f"DG: option letters must be single tokens, got {ids}")
+            self._dg_letter_ids = [x[0] for x in ids]
+        # ---- prompts in batch order; the n rollouts of a prompt are contiguous after repeat(interleave=True)
+        groups: dict = {}
+        for i, u in enumerate(nt["uid"]):
+            groups.setdefault(u, []).append(i)
+        uids = list(groups)
+        if any(len(groups[u]) != n_roll for u in uids):
+            raise RuntimeError(f"DG: every prompt must have exactly n={n_roll} rollouts in the batch")
+        g, elig, cov, noL, mass, within, pS_all = [], [], [], [], [], [], []
+        ei = nt["extra_info"]; topk = nt["dg_first_topk"]
+        for u in uids:
+            rows = groups[u]; e = ei[rows[0]]
+            for key in ("dg_row", "dg_pT0", "dg_opts", "dg_traj_ok", "dg_traj"):
+                if not isinstance(e, dict) or key not in e:
+                    raise ValueError(f"DG: extra_info lacks '{key}' (use the train_dg parquet from scripts/build_dg_parquet.py)")
+            if any(ei[r]["dg_row"] != e["dg_row"] for r in rows):
+                raise RuntimeError("DG: rollouts of one uid come from different questions")
+            opts = str(e["dg_opts"]); pT = np.asarray(e["dg_pT0"], dtype=np.float64)
+            pS, info = G.letter_dist_from_topk(topk[rows[0]], self._dg_letter_ids, opts)
+            # the prefill (hence the t=0 readout) is the same for all n rollouts of a prompt: monitor that it is
+            within.append(max(G.tv(pS, G.letter_dist_from_topk(topk[r], self._dg_letter_ids, opts)[0]) for r in rows))
+            g.append(G.tv(pS, pT)); elig.append(bool(e["dg_traj_ok"])); pS_all.append(pS)
+            cov.append(info["covered"]); noL.append(info["no_letter"]); mass.append(info["letter_mass"])
+        g = np.asarray(g); elig = np.asarray(elig, dtype=bool)
+        sel = G.select_prompts(g, elig, frac, mode, int(self.config.data.get("seed", 42)), int(self.global_steps))
+        is_t = torch.zeros(B, dtype=torch.float32)
+        metrics = {
+            "dg/prompts": float(len(uids)), "dg/eligible_frac": float(elig.mean()), "dg/selected_prompts": float(len(sel)),
+            "dg/g_mean": float(g.mean()), "dg/g_selected_mean": float(g[sel].mean()) if len(sel) else 0.0,
+            "dg/g_rest_mean": float(np.delete(g, sel).mean()) if len(sel) < len(g) else 0.0,
+            "dg/pS_option_cover": float(np.mean(cov)), "dg/pS_no_letter_frac": float(np.mean(noL)),
+            "dg/pS_letter_mass": float(np.mean(mass)), "dg/pS_within_prompt_tv": float(np.max(within)),
+            "dg/mode_gate": float(mode == "gate"), "dg/frac": frac, "dg/topk": float(k),
+        }
+        # student-side monitoring over ALL rollouts (before replacement)
+        resp_attn = batch.batch["attention_mask"][:, Lp:]
+        stud_txt = [tok.decode(P.unpad_response(batch.batch["responses"][i], resp_attn[i])) for i in range(B)]
+        metrics["dg/student_leak_row_frac"] = float(np.mean([G.LEAK_RE.search(t) is not None for t in stud_txt]))
+        # terminator of the student's naturally finished responses (the teacher text was decoded without special tokens)
+        lens = resp_attn.sum(-1)
+        lasts = [int(batch.batch["responses"][i, int(lens[i]) - 1]) for i in range(B) if 0 < int(lens[i]) < R]
+        if not lasts:
+            raise RuntimeError("DG: no naturally finished student response in the batch to read the end-of-turn token from")
+        term = tok.convert_tokens_to_ids("<|im_end|>")
+        if term is None or term == tok.unk_token_id or term not in set(tok.all_special_ids):
+            raise RuntimeError("DG: tokenizer has no <|im_end|> special token")
+        if max(set(lasts), key=lasts.count) != term:   # the student's own finished responses must end with it too
+            raise RuntimeError(f"DG: finished student responses do not end with <|im_end|> ({term})")
+        if len(sel) == 0:
+            batch.batch["dg_is_teacher"] = is_t
+            metrics.update({"dg/replaced_rows": 0.0, "dg/replaced_row_frac": 0.0, "dg/replaced_token_frac": 0.0})
+            return metrics
+        pad_id = tok.pad_token_id if tok.pad_token_id is not None else 0
+        mm = nt.get("multi_modal_inputs", None)
+        # self-check: the position-id helper must reproduce the rollout's position ids on an untouched row
+        _i0 = groups[uids[0]][0]
+        _pos0 = P.compute_position_ids(self.processor, batch.batch["input_ids"][_i0].unsqueeze(0),
+                                       batch.batch["attention_mask"][_i0].unsqueeze(0), dict(mm[_i0]) if mm is not None else {})
+        if not torch.equal(_pos0.squeeze(0).to(batch.batch["position_ids"].dtype), batch.batch["position_ids"][_i0].cpu()):
+            raise RuntimeError("DG: compute_position_ids does not reproduce the rollout position_ids")
+        t_len, s_len, trunc, leak = [], [], 0, 0
+        dump = []
+        for j in sel.tolist():
+            r = groups[uids[j]][-1]
+            e = ei[r]
+            ids = tok.encode(str(e["dg_traj"]), add_special_tokens=False)
+            if not ids:
+                raise RuntimeError(f"DG: empty teacher trajectory for dg_row {e['dg_row']}")
+            ids = ids + [term]
+            trunc += int(len(ids) > R); ids = ids[:R]
+            s_len.append(int(lens[r])); t_len.append(len(ids)); leak += int(G.LEAK_RE.search(str(e["dg_traj"])) is not None)
+            rowt = P.make_branch_row_tensors(batch.batch["prompts"][r], batch.batch["attention_mask"][r, :Lp], [], ids, R, pad_id, None)
+            pos = P.compute_position_ids(self.processor, rowt["input_ids"].unsqueeze(0), rowt["attention_mask"].unsqueeze(0),
+                                         dict(mm[r]) if mm is not None else {}).squeeze(0)
+            if pos.shape != batch.batch["position_ids"][r].shape:
+                raise RuntimeError(f"DG position_ids shape {tuple(pos.shape)} != row {tuple(batch.batch['position_ids'][r].shape)}")
+            for key in ("responses", "input_ids", "attention_mask", "response_mask"):
+                batch.batch[key][r] = rowt[key].to(batch.batch[key].dtype)
+            batch.batch["position_ids"][r] = pos.to(batch.batch["position_ids"].dtype)
+            for key in ("rollout_log_probs", "rm_scores"):   # undefined for a teacher-written response; unused on-policy
+                if key in batch.batch.keys():
+                    batch.batch[key][r] = 0
+            is_t[r] = 1.0
+            if os.environ.get("DG_DUMP"):
+                dump.append(dict(dg_row=int(e["dg_row"]), batch_row=int(r), g=float(g[j]), teacher_ids=len(ids),
+                                 student_len=int(lens[r]), teacher_text=str(e["dg_traj"])[:400]))
+        batch.batch["dg_is_teacher"] = is_t
+        metrics.update({
+            "dg/replaced_rows": float(is_t.sum()), "dg/replaced_row_frac": float(is_t.mean()),
+            "dg/teacher_len_mean": float(np.mean(t_len)), "dg/replaced_student_len_mean": float(np.mean(s_len)),
+            "dg/teacher_trunc_frac": trunc / len(sel), "dg/teacher_leak_row_frac": leak / len(sel),
+            # style / dose (review R3): short (direct-answer) teacher rows, and the replaced rows' share of response tokens
+            # (loss is token-mean over the batch, so this is their share of the distillation signal)
+            "dg/teacher_direct_frac": float(np.mean([l <= 16 for l in t_len])),
+            "dg/replaced_token_frac": float(sum(t_len)) / max(float(batch.batch["response_mask"].sum()), 1.0),
+        })
+        if os.environ.get("DG_DUMP"):
+            P.smoke_dump(os.environ["DG_DUMP"], f"dg_step{int(self.global_steps)}.json", dict(
+                mode=mode, frac=frac, term=int(term), sel=[int(s) for s in sel],
+                prompts=[dict(dg_row=int(ei[groups[u][0]]["dg_row"]), g=float(g[j]), eligible=bool(elig[j]),
+                              pS=[float(x) for x in pS_all[j]], pT=list(map(float, ei[groups[u][0]]["dg_pT0"])),
+                              topk={str(t): float(v) for t, v in (topk[groups[u][0]] or {}).items()})
+                         for j, u in enumerate(uids)],
+                replaced=dump, metrics=metrics))
+        return metrics
+
     def _pbd_cfg(self):
         sd = self.config.actor_rollout_ref.actor.get("self_distillation", None)
         if sd is None or not bool(sd.get("pbd_enable", False)):
@@ -2850,6 +3024,8 @@ class RayPPOTrainer:
                     # repeat to align with repeated responses in rollout
                     batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     batch = batch.union(gen_batch_output)
+                    # DG: replace one rollout of the gated prompts by the offline frozen-teacher trajectory (verl/utils/dg.py)
+                    metrics.update(self._maybe_apply_dg(batch))
                     # P5 PBD: crop-view continuations -> branch rows appended to the batch (verl/utils/pbd.py)
                     batch, _pbd_metrics = self._maybe_append_pbd_branch_rows(batch, timing_raw)
                     if _pbd_metrics:

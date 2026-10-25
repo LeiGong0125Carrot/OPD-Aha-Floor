@@ -173,6 +173,12 @@ self_distillation:
   tsw_key: tsw_low25
   tsw_lambda: 0.5
 
+  # DG: disagreement-gated teacher-trajectory distillation (teacher_stability/disagreement_gate_plan.md v2)
+  dg_enable: false
+  dg_mode: gate
+  dg_frac: 0.25
+  dg_topk: 20
+
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 

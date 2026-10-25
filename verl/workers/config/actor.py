@@ -136,6 +136,12 @@ class SelfDistillationConfig(BaseConfig):
     tsw_enable: bool = False
     tsw_key: str = "tsw_low25"       # tsw_low25 (probe-lowest 25%) | tsw_rand25 (matched random set)
     tsw_lambda: float = 0.5          # 1 = equal weights, 0.5 = soft, 0 = hard
+    # DG (teacher_stability/disagreement_gate_plan.md v2): per step, replace one of the n rollouts of the top dg_frac prompts
+    # by g = TV(p_S0, p_T0) (gate) or of a matched random set (random) with the offline frozen-teacher trajectory.
+    dg_enable: bool = False
+    dg_mode: str = "gate"            # gate | random
+    dg_frac: float = 0.25            # fraction of the step's prompts that get a teacher trajectory
+    dg_topk: int = 20                # top-k logprobs of the first generated position (vLLM max_logprobs default 20)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -224,6 +230,17 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
             if self.teacher_target_mode not in (None, "legacy"):
                 raise ValueError("PBD requires teacher_target_mode=legacy")
+        if self.dg_enable:
+            if self.dg_mode not in ("gate", "random"):
+                raise ValueError(f"self_distillation.dg_mode must be gate|random, got {self.dg_mode!r}")
+            if not (0.0 < self.dg_frac <= 1.0):
+                raise ValueError(f"self_distillation.dg_frac must be in (0,1], got {self.dg_frac}")
+            if not (1 <= self.dg_topk <= 20):
+                raise ValueError(f"self_distillation.dg_topk must be in [1,20] (vLLM max_logprobs), got {self.dg_topk}")
+            if self.pbd_enable or self.tsw_enable:
+                raise ValueError("DG runs on the V0 base: pbd_enable and tsw_enable must be False")
+            if self.counterfactual_null_mode is not None:
+                raise ValueError("DG runs on the V0 base: counterfactual_null_mode must be None")
         if self.tsw_enable:
             if not (0.0 <= self.tsw_lambda <= 1.0):
                 raise ValueError(f"self_distillation.tsw_lambda must be in [0,1], got {self.tsw_lambda}")

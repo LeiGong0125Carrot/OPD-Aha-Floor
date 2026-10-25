@@ -62,6 +62,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
             )
+        first_token_topk = output.first_token_topk
         response_mask = [1] * len(output.token_ids)
         response_length = self._get_response_length()
 
@@ -79,4 +80,6 @@ class SingleTurnAgentLoop(AgentLoopBase):
             num_turns=2,
             metrics=metrics,
         )
+        if first_token_topk is not None:   # DG gate readout (verl/utils/dg.py) -> non_tensor_batch["dg_first_topk"]
+            output.extra_fields["dg_first_topk"] = first_token_topk
         return output

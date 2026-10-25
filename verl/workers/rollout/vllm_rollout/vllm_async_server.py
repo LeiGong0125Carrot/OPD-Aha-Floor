@@ -496,7 +496,12 @@ class vLLMHttpServer:
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"
         )
-        sampling_params["logprobs"] = 0 if sampling_params.pop("logprobs", False) else None
+        want_token_logprobs = bool(sampling_params.pop("logprobs", False))
+        # DG: top-k of the first generated position (the t=0 answer readout of this prompt); vLLM returns the top-k (plus
+        # the sampled token) at every position, only position 0 is kept. Per-token log_probs are still returned only when
+        # they were asked for, so the default path is unchanged.
+        first_token_topk_k = int(sampling_params.pop("first_token_topk", 0) or 0)
+        sampling_params["logprobs"] = first_token_topk_k if first_token_topk_k > 0 else (0 if want_token_logprobs else None)
         sampling_params.setdefault("repetition_penalty", self.config.get("repetition_penalty", 1.0))
         existing_bad_words = sampling_params.pop("bad_words", None) or []
         sampling_params["bad_words"] = list(dict.fromkeys([*existing_bad_words, *VISION_SPECIAL_TOKENS]))
@@ -536,8 +541,13 @@ class vLLMHttpServer:
 
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
-        if sampling_params.logprobs is not None:
+        if want_token_logprobs:
             log_probs = [logprobs[token_ids[i]].logprob for i, logprobs in enumerate(final_res.outputs[0].logprobs)]
+        first_token_topk = None
+        if first_token_topk_k > 0 and final_res.outputs[0].logprobs:
+            from verl.utils.dg import first_topk_from_vllm
+
+            first_token_topk = first_topk_from_vllm(final_res.outputs[0].logprobs[0])
 
         routed_experts = None
         if self.config.enable_rollout_routing_replay:
@@ -553,7 +563,8 @@ class vLLMHttpServer:
             stop_reason = finish_reason  # for more stop reason in the future
 
         return TokenOutput(
-            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason
+            token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts, stop_reason=stop_reason,
+            first_token_topk=first_token_topk,
         )
 
     async def wake_up(self):

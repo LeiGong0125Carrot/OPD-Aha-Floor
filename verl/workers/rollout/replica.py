@@ -39,6 +39,8 @@ class TokenOutput(BaseModel):
     """routed experts of response token ids"""
     stop_reason: Optional[str] = None
     """stop reason: 'completed', 'aborted', or None for unknown"""
+    first_token_topk: Optional[dict[int, float]] = None
+    """DG: {token_id: logprob} top-k of the FIRST generated position (only when sampling_params asked first_token_topk)"""
 
 
 class RolloutMode(Enum):
