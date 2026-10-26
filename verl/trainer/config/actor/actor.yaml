@@ -173,6 +173,16 @@ self_distillation:
   tsw_key: tsw_low25
   tsw_lambda: 0.5
 
+  # OPRD-Vanilla hidden-state distillation (verl/utils/oprd.py; arXiv 2606.06021 main branch)
+  oprd_enable: false
+  oprd_only: true
+  oprd_coef: 1.0
+  oprd_layers: all
+  oprd_positions: last_k
+  oprd_last_k: 2000
+  oprd_first_k: 2000
+  oprd_normalize: false
+
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
 

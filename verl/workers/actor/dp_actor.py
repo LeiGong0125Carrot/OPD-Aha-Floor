@@ -228,6 +228,23 @@ class DataParallelPPOActor(BasePPOActor):
         return response_positions.to(dtype=torch.long)
 
     @staticmethod
+    def _oprd_response_token_positions(micro_batch, response_start_idx, response_length: int, seqlen: int):
+        """(abs_pos, valid), both (bs, response_len): absolute position of response token t (the hidden state AT y_t, as
+        OPRD's hidden_states[:, -response_len:]) -- response_start_idx + t, or seqlen - response_len + t for the
+        right-aligned [prompt | response] layout -- and the valid response tokens (attention mask on the response block)."""
+        B = micro_batch["input_ids"].shape[0]
+        offs = torch.arange(response_length, device=micro_batch["input_ids"].device)
+        if response_start_idx is None:
+            start = torch.full((B,), seqlen - response_length, dtype=torch.long, device=offs.device)
+        else:
+            start = response_start_idx.to(device=offs.device, dtype=torch.long)
+        abs_pos = start.unsqueeze(1) + offs.unsqueeze(0)
+        if (abs_pos < 0).any() or (abs_pos >= seqlen).any():
+            raise ValueError(f"OPRD response positions out of bounds for seqlen={seqlen}")
+        valid = torch.gather(micro_batch["attention_mask"], 1, abs_pos).bool()
+        return abs_pos, valid
+
+    @staticmethod
     def _select_response_positions(
         hidden_states: torch.Tensor,
         response_length: int,
@@ -298,6 +315,44 @@ class DataParallelPPOActor(BasePPOActor):
             save_path,
         )
 
+    def _oprd_cfg(self, sd) -> Optional[dict]:
+        """OPRD settings from self_distillation (runtime guards: hydra DictConfig skips the dataclass __post_init__)."""
+        if sd is None or not bool(sd.get("oprd_enable", False)):
+            return None
+        from verl.utils import oprd as _oprd
+
+        c = dict(layers=str(sd.get("oprd_layers", "all")), positions=str(sd.get("oprd_positions", "last_k")),
+                 last_k=int(sd.get("oprd_last_k", 2000)), first_k=int(sd.get("oprd_first_k", 2000)),
+                 coef=float(sd.get("oprd_coef", 1.0)), only=bool(sd.get("oprd_only", True)),
+                 normalize=bool(sd.get("oprd_normalize", False)))
+        if c["layers"] not in _oprd.VALID_LAYERS: raise ValueError(f"oprd_layers must be one of {_oprd.VALID_LAYERS}")
+        if c["positions"] not in _oprd.VALID_POSITIONS: raise ValueError(f"oprd_positions must be one of {_oprd.VALID_POSITIONS}")
+        if c["coef"] < 0 or c["last_k"] < 1 or c["first_k"] < 1: raise ValueError("oprd_coef >= 0, oprd_last_k/first_k >= 1")
+        if self.use_ulysses_sp or self.use_fused_kernels: raise ValueError("OPRD requires ulysses_sp=1 and use_fused_kernels=False")
+        if sd.get("counterfactual_null_mode", None) not in (None, "null", "None"):
+            raise ValueError("OPRD-Vanilla runs on the V0 base: counterfactual_null_mode must be None")
+        if bool(sd.get("pbd_enable", False)) or bool(sd.get("tsw_enable", False)):
+            raise ValueError("OPRD-Vanilla runs on the V0 base: pbd_enable / tsw_enable must be False")
+        if str(sd.get("teacher_target_mode", "legacy") or "legacy") != "legacy":
+            raise ValueError("OPRD requires teacher_target_mode=legacy")
+        return c
+
+    @staticmethod
+    def _oprd_check_hidden(hs, req: dict) -> None:
+        """Guard against silent partial supervision: the model must return embeddings + one state per block, and with
+        grad enabled every selected layer must carry grad (a capture inside a reentrant checkpoint would not)."""
+        from verl.utils import oprd as _oprd
+
+        if hs is None:
+            raise RuntimeError("OPRD: the model returned no hidden_states (output_hidden_states not honoured)")
+        n_exp = req.get("expected_hidden_states")
+        if n_exp is not None and len(hs) != int(n_exp):
+            raise RuntimeError(f"OPRD: expected {n_exp} hidden states, got {len(hs)}")
+        if torch.is_grad_enabled():
+            idx = _oprd.layer_indices(len(hs), str(req["layers"]))
+            if not all(hs[i].requires_grad for i in idx):
+                raise RuntimeError("OPRD: some selected hidden states carry no grad (capture inside a checkpoint?)")
+
     def _forward_micro_batch(
         self,
         micro_batch: dict[str, torch.Tensor],
@@ -309,6 +364,7 @@ class DataParallelPPOActor(BasePPOActor):
         module: Optional[nn.Module] = None,
         residual_capture=None,
         internal_target_cfg: Optional[dict] = None,
+        oprd_hidden: Optional[dict] = None,
     ) -> dict[str, torch.Tensor]:
         """
         Returns:
@@ -323,6 +379,9 @@ class DataParallelPPOActor(BasePPOActor):
                 if distill_topk or topk_indices is set:
                     topk_logps: (bs, response_len, k)
                     topk_indices: (bs, response_len, k)
+                if oprd_hidden = {"layers": str} is set (OPRD, verl/utils/oprd.py):
+                    oprd_hidden: (bs, n_layers, response_len, hidden) fp32 hidden states AT the response tokens
+                    (absolute position response_start + t; 0 at padded response positions)
         """
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
         sum_pi_squared_checkpointing = self.config.get("sum_pi_squared_checkpointing", False)
@@ -334,6 +393,9 @@ class DataParallelPPOActor(BasePPOActor):
 
         model = module or self.actor_module
         internal_target_log_probs = internal_r_topk = None
+        oprd_repr = None
+        if oprd_hidden is not None and (self.use_ulysses_sp or self.use_fused_kernels):
+            raise ValueError("OPRD hidden-state capture is implemented for ulysses_sp=1 and non-fused kernels only")
         if residual_capture is not None:
             if not self.use_remove_padding or self.use_ulysses_sp or self.use_fused_kernels or topk_indices is None:
                 raise ValueError(
@@ -482,6 +544,8 @@ class DataParallelPPOActor(BasePPOActor):
                     _full_mask[torch.arange(batch_size, device=input_ids.device).unsqueeze(1), _rp] = True
                     _packed_resp_mask = _full_mask.reshape(-1)[indices]
                     residual_capture.set_response_mask(_packed_resp_mask)
+                if oprd_hidden is not None:
+                    extra_args["output_hidden_states"] = True
                 with (residual_capture if residual_capture is not None else contextlib.nullcontext()):
                     output = model(
                         input_ids=input_ids_rmpad,
@@ -491,6 +555,18 @@ class DataParallelPPOActor(BasePPOActor):
                         use_cache=False,
                         **extra_args,
                     )  # prevent model thinks we are generating
+                if oprd_hidden is not None:
+                    from verl.utils import oprd as _oprd
+
+                    _hs = output.hidden_states
+                    self._oprd_check_hidden(_hs, oprd_hidden)
+                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen)
+                    _packed = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=input_ids.device)
+                    _packed[indices] = torch.arange(indices.numel(), device=input_ids.device)
+                    oprd_repr = _oprd.gather_response_hidden(
+                        _hs, _oprd.layer_indices(len(_hs), str(oprd_hidden["layers"])), _abs, _valid, packed_index=_packed
+                    )
+                    del _hs
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs.squeeze(0)  # (total_nnz,)
@@ -723,6 +799,8 @@ class DataParallelPPOActor(BasePPOActor):
                     extra_args["temperature"] = temperature
                     extra_args["return_dict"] = True
 
+                if oprd_hidden is not None:
+                    extra_args["output_hidden_states"] = True
                 output = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -731,6 +809,14 @@ class DataParallelPPOActor(BasePPOActor):
                     use_cache=False,
                     **extra_args,
                 )  # prevent model thinks we are generating
+                if oprd_hidden is not None:
+                    from verl.utils import oprd as _oprd
+
+                    _hs = output.hidden_states
+                    self._oprd_check_hidden(_hs, oprd_hidden)
+                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen)
+                    oprd_repr = _oprd.gather_response_hidden(_hs, _oprd.layer_indices(len(_hs), str(oprd_hidden["layers"])), _abs, _valid)
+                    del _hs
 
                 if self.use_fused_kernels:
                     log_probs = output.log_probs[:, -response_length - 1 : -1]
@@ -784,6 +870,8 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["internal_r_topk"] = internal_r_topk
             if internal_target_log_probs is not None:
                 outputs["internal_target_log_probs"] = internal_target_log_probs
+            if oprd_repr is not None:
+                outputs["oprd_hidden"] = oprd_repr
             return outputs
 
     def _optimizer_step(self):
@@ -1061,6 +1149,13 @@ class DataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
                     distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
+                    # OPRD (verl/utils/oprd.py): hidden states at the response tokens from the SAME student forward
+                    oprd_cfg = self._oprd_cfg(self_distillation_cfg) if self_distillation_enabled else None
+                    oprd_hidden_req = None
+                    if oprd_cfg is not None:
+                        _mc = getattr(getattr(self.actor_module, "config", None), "text_config", None) or getattr(self.actor_module, "config", None)
+                        _nl = getattr(_mc, "num_hidden_layers", None)
+                        oprd_hidden_req = {"layers": oprd_cfg["layers"], "expected_hidden_states": (_nl + 1) if _nl else None}
                     student_forward_start = time.perf_counter()
                     outputs = self._forward_micro_batch(
                         model_inputs,
@@ -1068,7 +1163,14 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy=calculate_entropy,
                         return_all_logps=return_all_logps,
                         distill_topk=distill_topk,
+                        oprd_hidden=oprd_hidden_req,
                     )
+                    if oprd_cfg is not None and oprd_cfg["only"]:
+                        # rep-only: the logit-side outputs only feed monitoring; detaching them frees the lm-head /
+                        # log-softmax graph now instead of holding it (several GB) until the next micro-batch
+                        for _k in ("log_probs", "entropys", "all_logps", "topk_logps"):
+                            if outputs.get(_k) is not None:
+                                outputs[_k] = outputs[_k].detach()
                     if self_distillation_enabled:
                         student_forward_time = time.perf_counter() - student_forward_start
                         stage_wall_time_totals["timing_s/update_actor/student_forward"] += student_forward_time
@@ -1137,6 +1239,7 @@ class DataParallelPPOActor(BasePPOActor):
                                 module=teacher_model,
                                 residual_capture=residual_capture,
                                 internal_target_cfg=internal_target_cfg,
+                                oprd_hidden=oprd_hidden_req,
                             )
                             if residual_capture is not None and os.environ.get("VOPD_IR_VERIFY") == "1" \
                                     and not getattr(self, "_ir_verified", False):
@@ -1331,6 +1434,35 @@ class DataParallelPPOActor(BasePPOActor):
                         else:
                             grpo_loss = None
                             pg_loss = vopd_loss
+                        if oprd_cfg is not None:
+                            from verl.utils import oprd as _oprd
+
+                            _s_rep, _t_rep = outputs["oprd_hidden"], teacher_outputs["oprd_hidden"]
+                            if _s_rep.shape != _t_rep.shape:
+                                raise RuntimeError(f"OPRD student/teacher repr shapes differ: {tuple(_s_rep.shape)} vs {tuple(_t_rep.shape)}")
+                            _pm = _oprd.position_mask(response_mask, oprd_cfg["positions"], oprd_cfg["last_k"], oprd_cfg["first_k"])
+                            if self_distillation_mask is not None:   # rows without a teacher view carry no target
+                                _pm = _pm * (self_distillation_mask > 0.5).to(_pm.dtype).unsqueeze(1)
+                            rep_loss = _oprd.mse_loss(_s_rep, _t_rep, _pm, normalize=oprd_cfg["normalize"])
+                            _cos = _oprd.cosine(_s_rep.detach(), _t_rep, _pm)
+                            with torch.no_grad():
+                                _nL = _s_rep.shape[1]
+                                _lm = [float(_oprd.mse_loss(_s_rep[:, j:j + 1].detach(), _t_rep[:, j:j + 1], _pm, normalize=oprd_cfg["normalize"]))
+                                       for j in (0, _nL // 2, _nL - 1)]
+                            micro_batch_metrics.update({
+                                "oprd/rep_loss": rep_loss.detach().item(),
+                                "oprd/rep_weighted_loss": rep_loss.detach().item() * oprd_cfg["coef"],
+                                "oprd/cosine_mean": _cos.mean().item(),
+                                "oprd/cosine_first_layer": _cos[0].item(), "oprd/cosine_mid_layer": _cos[len(_cos) // 2].item(),
+                                "oprd/cosine_last_layer": _cos[-1].item(),
+                                "oprd/num_layers": float(_s_rep.shape[1]), "oprd/supervised_tokens": float(_pm.sum().item()),
+                                "oprd/mse_first_layer": _lm[0], "oprd/mse_mid_layer": _lm[1], "oprd/mse_last_layer": _lm[2],
+                                "oprd/only": float(oprd_cfg["only"]),
+                            })
+                            # rep-only (OPRD-Vanilla default): the JSD above is still computed for monitoring, not trained
+                            pg_loss = rep_loss * oprd_cfg["coef"] if oprd_cfg["only"] else pg_loss + rep_loss * oprd_cfg["coef"]
+                            del _s_rep, _t_rep
+                            outputs.pop("oprd_hidden", None); teacher_outputs.pop("oprd_hidden", None)
                     else:
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                         # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov

@@ -136,6 +136,16 @@ class SelfDistillationConfig(BaseConfig):
     tsw_enable: bool = False
     tsw_key: str = "tsw_low25"       # tsw_low25 (probe-lowest 25%) | tsw_rand25 (matched random set)
     tsw_lambda: float = 0.5          # 1 = equal weights, 0.5 = soft, 0 = hard
+    # OPRD-Vanilla (arXiv 2606.06021, paper-exact `main` branch; verl/utils/oprd.py): MSE between student and frozen-teacher
+    # hidden states at the response tokens, layer-averaged; rep-only by default (the JSD is then monitoring only).
+    oprd_enable: bool = False
+    oprd_only: bool = True           # True = rep-only (paper default); False = JSD + oprd_coef * rep
+    oprd_coef: float = 1.0
+    oprd_layers: str = "all"         # all | last | even | odd  (HF hidden_states 1..L; embeddings never used)
+    oprd_positions: str = "last_k"   # all | last | last_k | first_k (over the response tokens)
+    oprd_last_k: int = 2000
+    oprd_first_k: int = 2000
+    oprd_normalize: bool = False     # False = paper/main (plain MSE); True = OPRD-Bridge branch (L2-normalised MSE)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -224,6 +234,15 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
             if self.teacher_target_mode not in (None, "legacy"):
                 raise ValueError("PBD requires teacher_target_mode=legacy")
+        if self.oprd_enable:
+            if self.oprd_layers not in ("all", "last", "even", "odd"):
+                raise ValueError(f"self_distillation.oprd_layers must be all|last|even|odd, got {self.oprd_layers!r}")
+            if self.oprd_positions not in ("all", "last", "last_k", "first_k"):
+                raise ValueError(f"self_distillation.oprd_positions must be all|last|last_k|first_k, got {self.oprd_positions!r}")
+            if self.oprd_coef < 0 or self.oprd_last_k < 1 or self.oprd_first_k < 1:
+                raise ValueError("self_distillation.oprd_coef must be >= 0 and oprd_last_k / oprd_first_k >= 1")
+            if self.pbd_enable or self.tsw_enable or self.counterfactual_null_mode is not None:
+                raise ValueError("OPRD-Vanilla runs on the V0 base: pbd / tsw / counterfactual null must be off")
         if self.tsw_enable:
             if not (0.0 <= self.tsw_lambda <= 1.0):
                 raise ValueError(f"self_distillation.tsw_lambda must be in [0,1], got {self.tsw_lambda}")
