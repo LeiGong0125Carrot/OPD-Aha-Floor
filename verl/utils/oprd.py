@@ -66,6 +66,15 @@ def position_mask(response_mask: torch.Tensor, positions: str, last_k: int = 200
     return rm * ((pos >= (n - k).clamp(min=0)) & (pos < n)).float()
 
 
+def with_t0(pm: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
+    """Prepend the pre-generation state t=0 (the hidden state AT the last prompt token, which predicts y_0) to a (B, R)
+    response position mask -> (B, R+1); column 0 = t=0, supervised for every row with >= 1 valid response token
+    (user 10-29 ablation "first_frac + t=0" = probe_oprd_segments' full first25 segment). Pairs with
+    DataParallelPPOActor._oprd_response_token_positions(..., include_t0=True), whose column 0 is response_start - 1 of each view."""
+    has = (response_mask.float().sum(1, keepdim=True) > 0).to(pm.dtype)
+    return torch.cat([has, pm], 1)
+
+
 def gather_response_hidden(hidden_states, idx: list[int], abs_pos: torch.Tensor, valid: torch.Tensor,
                            packed_index: torch.Tensor | None = None) -> torch.Tensor:
     """Stack the selected layers' hidden states at absolute sequence positions -> (B, L_sel, R, D) float32.

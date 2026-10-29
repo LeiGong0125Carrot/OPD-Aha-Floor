@@ -147,6 +147,7 @@ class SelfDistillationConfig(BaseConfig):
     oprd_first_k: int = 2000
     oprd_frac: float = 0.25          # first_frac only: supervise the first ceil(frac * n) response tokens (ablation, not in OPRD)
     oprd_normalize: bool = False     # False = paper/main (plain MSE); True = OPRD-Bridge branch (L2-normalised MSE)
+    oprd_include_t0: bool = False    # also supervise t=0 = the last prompt token's hidden state (pre-generation; ablation, not in OPRD)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10

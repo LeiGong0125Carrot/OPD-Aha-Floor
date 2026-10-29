@@ -228,12 +228,15 @@ class DataParallelPPOActor(BasePPOActor):
         return response_positions.to(dtype=torch.long)
 
     @staticmethod
-    def _oprd_response_token_positions(micro_batch, response_start_idx, response_length: int, seqlen: int):
-        """(abs_pos, valid), both (bs, response_len): absolute position of response token t (the hidden state AT y_t, as
+    def _oprd_response_token_positions(micro_batch, response_start_idx, response_length: int, seqlen: int,
+                                       include_t0: bool = False):
+        """(abs_pos, valid), both (bs, response_len) [(bs, response_len + 1) with include_t0]: absolute position of response token t (the hidden state AT y_t, as
         OPRD's hidden_states[:, -response_len:]) -- response_start_idx + t, or seqlen - response_len + t for the
-        right-aligned [prompt | response] layout -- and the valid response tokens (attention mask on the response block)."""
+        right-aligned [prompt | response] layout -- and the valid response tokens (attention mask on the response block).
+        include_t0: prepend column start - 1 (the last prompt token of this view = pre-generation state t=0) -> (bs, R+1),
+        to be paired with oprd.with_t0 on the position mask."""
         B = micro_batch["input_ids"].shape[0]
-        offs = torch.arange(response_length, device=micro_batch["input_ids"].device)
+        offs = torch.arange(-1 if include_t0 else 0, response_length, device=micro_batch["input_ids"].device)
         if response_start_idx is None:
             start = torch.full((B,), seqlen - response_length, dtype=torch.long, device=offs.device)
         else:
@@ -324,7 +327,7 @@ class DataParallelPPOActor(BasePPOActor):
         c = dict(layers=str(sd.get("oprd_layers", "all")), positions=str(sd.get("oprd_positions", "last_k")),
                  last_k=int(sd.get("oprd_last_k", 2000)), first_k=int(sd.get("oprd_first_k", 2000)),
                  frac=float(sd.get("oprd_frac", 0.25)), coef=float(sd.get("oprd_coef", 1.0)), only=bool(sd.get("oprd_only", True)),
-                 normalize=bool(sd.get("oprd_normalize", False)))
+                 normalize=bool(sd.get("oprd_normalize", False)), include_t0=bool(sd.get("oprd_include_t0", False)))
         if c["layers"] not in _oprd.VALID_LAYERS: raise ValueError(f"oprd_layers must be one of {_oprd.VALID_LAYERS}")
         if c["positions"] not in _oprd.VALID_POSITIONS: raise ValueError(f"oprd_positions must be one of {_oprd.VALID_POSITIONS}")
         if c["coef"] < 0 or c["last_k"] < 1 or c["first_k"] < 1: raise ValueError("oprd_coef >= 0, oprd_last_k/first_k >= 1")
@@ -561,7 +564,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                     _hs = output.hidden_states
                     self._oprd_check_hidden(_hs, oprd_hidden)
-                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen)
+                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen,
+                                                                       include_t0=bool(oprd_hidden.get("include_t0", False)))
                     _packed = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=input_ids.device)
                     _packed[indices] = torch.arange(indices.numel(), device=input_ids.device)
                     oprd_repr = _oprd.gather_response_hidden(
@@ -815,7 +819,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                     _hs = output.hidden_states
                     self._oprd_check_hidden(_hs, oprd_hidden)
-                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen)
+                    _abs, _valid = self._oprd_response_token_positions(micro_batch, response_start_idx, response_length, seqlen,
+                                                                       include_t0=bool(oprd_hidden.get("include_t0", False)))
                     oprd_repr = _oprd.gather_response_hidden(_hs, _oprd.layer_indices(len(_hs), str(oprd_hidden["layers"])), _abs, _valid)
                     del _hs
 
@@ -1156,7 +1161,8 @@ class DataParallelPPOActor(BasePPOActor):
                     if oprd_cfg is not None:
                         _mc = getattr(getattr(self.actor_module, "config", None), "text_config", None) or getattr(self.actor_module, "config", None)
                         _nl = getattr(_mc, "num_hidden_layers", None)
-                        oprd_hidden_req = {"layers": oprd_cfg["layers"], "expected_hidden_states": (_nl + 1) if _nl else None}
+                        oprd_hidden_req = {"layers": oprd_cfg["layers"], "expected_hidden_states": (_nl + 1) if _nl else None,
+                                           "include_t0": oprd_cfg["include_t0"]}
                     student_forward_start = time.perf_counter()
                     outputs = self._forward_micro_batch(
                         model_inputs,
@@ -1443,6 +1449,10 @@ class DataParallelPPOActor(BasePPOActor):
                                 raise RuntimeError(f"OPRD student/teacher repr shapes differ: {tuple(_s_rep.shape)} vs {tuple(_t_rep.shape)}")
                             _pm = _oprd.position_mask(response_mask, oprd_cfg["positions"], oprd_cfg["last_k"], oprd_cfg["first_k"],
                                                      oprd_cfg["frac"])
+                            if oprd_cfg["include_t0"]:   # column 0 of both reprs = the pre-generation state t=0
+                                _pm = _oprd.with_t0(_pm, response_mask)
+                            if _pm.shape[1] != _s_rep.shape[2]:
+                                raise RuntimeError(f"OPRD mask/repr length mismatch: {_pm.shape[1]} vs {_s_rep.shape[2]}")
                             if self_distillation_mask is not None:   # rows without a teacher view carry no target
                                 _pm = _pm * (self_distillation_mask > 0.5).to(_pm.dtype).unsqueeze(1)
                             rep_loss = _oprd.mse_loss(_s_rep, _t_rep, _pm, normalize=oprd_cfg["normalize"])
@@ -1461,6 +1471,14 @@ class DataParallelPPOActor(BasePPOActor):
                                 "oprd/mse_first_layer": _lm[0], "oprd/mse_mid_layer": _lm[1], "oprd/mse_last_layer": _lm[2],
                                 "oprd/only": float(oprd_cfg["only"]),
                             })
+                            if oprd_cfg["include_t0"]:
+                                _pm0 = torch.zeros_like(_pm); _pm0[:, 0] = _pm[:, 0]
+                                _c0 = _oprd.cosine(_s_rep.detach(), _t_rep, _pm0)
+                                with torch.no_grad():   # t=0 sees the whole view: its share of rep_loss can exceed 1/(k+1)
+                                    _m0 = float(_oprd.mse_loss(_s_rep[:, -1:].detach(), _t_rep[:, -1:], _pm0, normalize=oprd_cfg["normalize"]))
+                                micro_batch_metrics.update({"oprd/t0_cosine_last_layer": _c0[-1].item(),
+                                                            "oprd/t0_cosine_mid_layer": _c0[len(_c0) // 2].item(),
+                                                            "oprd/t0_mse_last_layer": _m0})
                             # rep-only (OPRD-Vanilla default): the JSD above is still computed for monitoring, not trained
                             pg_loss = rep_loss * oprd_cfg["coef"] if oprd_cfg["only"] else pg_loss + rep_loss * oprd_cfg["coef"]
                             del _s_rep, _t_rep
