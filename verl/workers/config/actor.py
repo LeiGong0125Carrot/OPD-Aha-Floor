@@ -142,9 +142,10 @@ class SelfDistillationConfig(BaseConfig):
     oprd_only: bool = True           # True = rep-only (paper default); False = JSD + oprd_coef * rep
     oprd_coef: float = 1.0
     oprd_layers: str = "all"         # all | last | even | odd  (HF hidden_states 1..L; embeddings never used)
-    oprd_positions: str = "last_k"   # all | last | last_k | first_k (over the response tokens)
+    oprd_positions: str = "last_k"   # all | last | last_k | first_k | first_frac (over the response tokens)
     oprd_last_k: int = 2000
     oprd_first_k: int = 2000
+    oprd_frac: float = 0.25          # first_frac only: supervise the first ceil(frac * n) response tokens (ablation, not in OPRD)
     oprd_normalize: bool = False     # False = paper/main (plain MSE); True = OPRD-Bridge branch (L2-normalised MSE)
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
@@ -237,8 +238,10 @@ class SelfDistillationConfig(BaseConfig):
         if self.oprd_enable:
             if self.oprd_layers not in ("all", "last", "even", "odd"):
                 raise ValueError(f"self_distillation.oprd_layers must be all|last|even|odd, got {self.oprd_layers!r}")
-            if self.oprd_positions not in ("all", "last", "last_k", "first_k"):
-                raise ValueError(f"self_distillation.oprd_positions must be all|last|last_k|first_k, got {self.oprd_positions!r}")
+            if self.oprd_positions not in ("all", "last", "last_k", "first_k", "first_frac"):
+                raise ValueError(f"self_distillation.oprd_positions must be all|last|last_k|first_k|first_frac, got {self.oprd_positions!r}")
+            if not 0.0 < self.oprd_frac <= 1.0:
+                raise ValueError(f"self_distillation.oprd_frac must be in (0, 1], got {self.oprd_frac}")
             if self.oprd_coef < 0 or self.oprd_last_k < 1 or self.oprd_first_k < 1:
                 raise ValueError("self_distillation.oprd_coef must be >= 0 and oprd_last_k / oprd_first_k >= 1")
             if self.pbd_enable or self.tsw_enable or self.counterfactual_null_mode is not None:

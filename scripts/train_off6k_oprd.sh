@@ -4,15 +4,22 @@
 # plain MSE, all transformer layers, last 2000 response tokens (= every response token here, R = 1024), rep-only
 # (the V0 JSD is still computed and logged, not trained). verl/utils/oprd.py.
 #   tag off6k_OPRDvn2 ; seed 42, rollout_n 2, lr 2e-6 (project default; the paper uses 1e-5), 130 steps, save 10.
-# 用法: [RUN_SUFFIX=..] [OPRD_ONLY=True] [OPRD_LAYERS=all] [OPRD_POSITIONS=last_k] bash scripts/train_off6k_oprd.sh
+# Token-level ablation (user 10-28): OPRD_POSITIONS=first_frac OPRD_FRAC=0.25 -> only the first ceil(0.25 n) response
+# tokens (t=0 / the last prompt token is never included), tag off6k_OPRDf25n2; everything else identical to Vanilla.
+# 用法: [RUN_SUFFIX=..] [OPRD_ONLY=True] [OPRD_LAYERS=all] [OPRD_POSITIONS=last_k|first_frac] [OPRD_FRAC=0.25] bash scripts/train_off6k_oprd.sh
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export OFF_MODE=V0 ROLLOUT_N="${ROLLOUT_N:-2}"
 export TASK_TRAIN_FILE="${TASK_TRAIN_FILE:-/scratch/nkw3mr/Vision-OPD/data/train.parquet}"
-export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-off6k_OPRDvn2${RUN_SUFFIX:-}}"
+case "${OPRD_POSITIONS:-last_k}" in
+    last_k) _TAG=off6k_OPRDvn2 ;;
+    first_frac) _f="${OPRD_FRAC:-0.25}"; _TAG="off6k_OPRDf$(python3 -c "print(round(100*float('${_f}')))")n2" ;;
+    *) _TAG="off6k_OPRD${OPRD_POSITIONS}n2" ;;
+esac
+export EXPERIMENT_NAME_OVERRIDE="${EXPERIMENT_NAME_OVERRIDE:-${_TAG}${RUN_SUFFIX:-}}"
 export TRAINER_SAVE_FREQ="${TRAINER_SAVE_FREQ:-10}" TRAINER_TOTAL_TRAINING_STEPS="${TRAINER_TOTAL_TRAINING_STEPS:-130}"
 export TRAINER_MAX_ACTOR_CKPT_TO_KEEP=null
-echo "OPRD-Vanilla: only=${OPRD_ONLY:-True} layers=${OPRD_LAYERS:-all} positions=${OPRD_POSITIONS:-last_k}/${OPRD_LAST_K:-2000} coef=${OPRD_COEF:-1.0} normalize=False"
+echo "OPRD-Vanilla: only=${OPRD_ONLY:-True} layers=${OPRD_LAYERS:-all} positions=${OPRD_POSITIONS:-last_k} last_k=${OPRD_LAST_K:-2000} frac=${OPRD_FRAC:-0.25} (frac only used by first_frac) coef=${OPRD_COEF:-1.0} normalize=False"
 exec "${PROJECT_ROOT}/scripts/train_official6k.sh" \
     actor_rollout_ref.actor.self_distillation.oprd_enable=True \
     actor_rollout_ref.actor.self_distillation.oprd_only="${OPRD_ONLY:-True}" \
@@ -20,5 +27,6 @@ exec "${PROJECT_ROOT}/scripts/train_official6k.sh" \
     actor_rollout_ref.actor.self_distillation.oprd_layers="${OPRD_LAYERS:-all}" \
     actor_rollout_ref.actor.self_distillation.oprd_positions="${OPRD_POSITIONS:-last_k}" \
     actor_rollout_ref.actor.self_distillation.oprd_last_k="${OPRD_LAST_K:-2000}" \
+    actor_rollout_ref.actor.self_distillation.oprd_frac="${OPRD_FRAC:-0.25}" \
     actor_rollout_ref.actor.self_distillation.oprd_normalize=False \
     "$@"

@@ -49,6 +49,22 @@ for mode in ("all", "last", "last_k", "first_k"):
         ok &= torch.equal(O.position_mask(rm, mode, last_k=k, first_k=k), REF.build_rep_distillation_position_mask(rm, mode, last_k=k, first_k=k))
 check("② position masks == reference (4 modes x k in {1,3,2000})", bool(ok))
 check("② last_k=2000 == all for responses <= 1024", torch.equal(O.position_mask(rm, "last_k", 2000), rm))
+# first_frac (our ablation, user 10-28): per-sample first ceil(frac * n) tokens == reference first_k with that per-row k
+ff = O.position_mask(rm, "first_frac", frac=0.25)
+check("② first_frac 0.25: kept counts ceil(n/4) for n = 12,5,1,8 -> 3,2,1,2", ff.sum(1).tolist() == [3.0, 2.0, 1.0, 2.0])
+ok = True
+for i, n in enumerate(lens.tolist()):
+    k = -(-n // 4)
+    ok &= torch.equal(ff[i:i + 1], REF.build_rep_distillation_position_mask(rm[i:i + 1], "first_k", first_k=k))
+check("② first_frac rows == reference first_k(k=ceil(n/4)) row by row", bool(ok))
+check("② first_frac is a prefix inside the valid response", bool(((ff <= rm).all()) and (ff[:, 0] == 1).all()))
+check("② first_frac 1.0 == all", torch.equal(O.position_mask(rm, "first_frac", frac=1.0), rm))
+rm0 = torch.zeros(1, R)
+check("② first_frac on an empty response -> nothing", O.position_mask(rm0, "first_frac", frac=0.25).sum().item() == 0)
+lens2 = torch.tensor([100, 101, 4, 3]); rm2 = (torch.arange(128).unsqueeze(0) < lens2.unsqueeze(1)).float()
+check("② first_frac counts 25,26,1,1 for n = 100,101,4,3", O.position_mask(rm2, "first_frac", frac=0.25).sum(1).tolist() == [25.0, 26.0, 1.0, 1.0])
+check("② first_frac 0.07 on n=100 keeps 7 (float ceil guard)", O.position_mask((torch.arange(128).unsqueeze(0) < 100).float(), "first_frac", frac=0.07).sum().item() == 7)
+check("② first_frac bad frac raises", raises(lambda: O.position_mask(rm, "first_frac", frac=0.0), ValueError) and raises(lambda: O.position_mask(rm, "first_frac", frac=1.5), ValueError))
 
 # ③ loss vs reference (multi-layer path with explicit num_layers, (B, L, T, D))
 L, D = 5, 16
@@ -136,11 +152,15 @@ check("⑦ defaults off, paper values", C().oprd_enable is False and C().oprd_on
 check("⑦ bad layers raises", raises(lambda: C(oprd_enable=True, oprd_layers="mid")))
 check("⑦ bad positions raises", raises(lambda: C(oprd_enable=True, oprd_positions="frac")))
 check("⑦ + tsw raises", raises(lambda: C(oprd_enable=True, tsw_enable=True)))
+check("⑦ first_frac accepted", not raises(lambda: C(oprd_enable=True, oprd_positions="first_frac", oprd_frac=0.25)))
+check("⑦ oprd_frac 1.5 raises", raises(lambda: C(oprd_enable=True, oprd_positions="first_frac", oprd_frac=1.5)))
 from omegaconf import OmegaConf  # noqa: E402
 fake = types.SimpleNamespace(use_ulysses_sp=False, use_fused_kernels=False)
 cfg = lambda **kw: OmegaConf.create(dict(dict(oprd_enable=True), **kw))
 c = A._oprd_cfg(fake, cfg())
-check("⑦ runtime cfg defaults", c == dict(layers="all", positions="last_k", last_k=2000, first_k=2000, coef=1.0, only=True, normalize=False))
+check("⑦ runtime cfg defaults", c == dict(layers="all", positions="last_k", last_k=2000, first_k=2000, frac=0.25, coef=1.0, only=True, normalize=False))
+check("⑦ runtime first_frac passes frac", A._oprd_cfg(fake, cfg(oprd_positions="first_frac", oprd_frac=0.25))["frac"] == 0.25)
+check("⑦ runtime: frac 0 raises", raises(lambda: A._oprd_cfg(fake, cfg(oprd_positions="first_frac", oprd_frac=0.0)), ValueError))
 check("⑦ runtime: off -> None", A._oprd_cfg(fake, OmegaConf.create(dict(oprd_enable=False))) is None)
 check("⑦ runtime: SP>1 raises", raises(lambda: A._oprd_cfg(types.SimpleNamespace(use_ulysses_sp=True, use_fused_kernels=False), cfg()), ValueError))
 check("⑦ runtime: null mode raises", raises(lambda: A._oprd_cfg(fake, cfg(counterfactual_null_mode="mean_color")), ValueError))

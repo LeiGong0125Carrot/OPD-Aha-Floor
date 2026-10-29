@@ -323,11 +323,12 @@ class DataParallelPPOActor(BasePPOActor):
 
         c = dict(layers=str(sd.get("oprd_layers", "all")), positions=str(sd.get("oprd_positions", "last_k")),
                  last_k=int(sd.get("oprd_last_k", 2000)), first_k=int(sd.get("oprd_first_k", 2000)),
-                 coef=float(sd.get("oprd_coef", 1.0)), only=bool(sd.get("oprd_only", True)),
+                 frac=float(sd.get("oprd_frac", 0.25)), coef=float(sd.get("oprd_coef", 1.0)), only=bool(sd.get("oprd_only", True)),
                  normalize=bool(sd.get("oprd_normalize", False)))
         if c["layers"] not in _oprd.VALID_LAYERS: raise ValueError(f"oprd_layers must be one of {_oprd.VALID_LAYERS}")
         if c["positions"] not in _oprd.VALID_POSITIONS: raise ValueError(f"oprd_positions must be one of {_oprd.VALID_POSITIONS}")
         if c["coef"] < 0 or c["last_k"] < 1 or c["first_k"] < 1: raise ValueError("oprd_coef >= 0, oprd_last_k/first_k >= 1")
+        if not 0.0 < c["frac"] <= 1.0: raise ValueError("oprd_frac must be in (0, 1]")
         if self.use_ulysses_sp or self.use_fused_kernels: raise ValueError("OPRD requires ulysses_sp=1 and use_fused_kernels=False")
         if sd.get("counterfactual_null_mode", None) not in (None, "null", "None"):
             raise ValueError("OPRD-Vanilla runs on the V0 base: counterfactual_null_mode must be None")
@@ -1440,7 +1441,8 @@ class DataParallelPPOActor(BasePPOActor):
                             _s_rep, _t_rep = outputs["oprd_hidden"], teacher_outputs["oprd_hidden"]
                             if _s_rep.shape != _t_rep.shape:
                                 raise RuntimeError(f"OPRD student/teacher repr shapes differ: {tuple(_s_rep.shape)} vs {tuple(_t_rep.shape)}")
-                            _pm = _oprd.position_mask(response_mask, oprd_cfg["positions"], oprd_cfg["last_k"], oprd_cfg["first_k"])
+                            _pm = _oprd.position_mask(response_mask, oprd_cfg["positions"], oprd_cfg["last_k"], oprd_cfg["first_k"],
+                                                     oprd_cfg["frac"])
                             if self_distillation_mask is not None:   # rows without a teacher view carry no target
                                 _pm = _pm * (self_distillation_mask > 0.5).to(_pm.dtype).unsqueeze(1)
                             rep_loss = _oprd.mse_loss(_s_rep, _t_rep, _pm, normalize=oprd_cfg["normalize"])

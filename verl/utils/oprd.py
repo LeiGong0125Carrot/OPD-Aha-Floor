@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 VALID_LAYERS = ("all", "last", "even", "odd")
-VALID_POSITIONS = ("all", "last", "last_k", "first_k")
+VALID_POSITIONS = ("all", "last", "last_k", "first_k", "first_frac")
 
 
 def layer_indices(num_hidden_states: int, layers: str) -> list[int]:
@@ -38,9 +38,12 @@ def layer_indices(num_hidden_states: int, layers: str) -> list[int]:
     return [1 + i for i in range(1, L, 2)]
 
 
-def position_mask(response_mask: torch.Tensor, positions: str, last_k: int = 2000, first_k: int = 2000) -> torch.Tensor:
+def position_mask(response_mask: torch.Tensor, positions: str, last_k: int = 2000, first_k: int = 2000,
+                  frac: float = 0.25) -> torch.Tensor:
     """(B, R) float mask of the supervised response positions (= OPRD build_rep_distillation_position_mask; response
-    tokens are left-aligned inside the response block, valid length = response_mask.sum)."""
+    tokens are left-aligned inside the response block, valid length = response_mask.sum).
+    "first_frac" (our token-level ablation, user 10-28; not in OPRD): the first ceil(frac * n) response tokens of each
+    sample (n = its valid length), i.e. probe_oprd_segments' first25 segment without the pre-generation state t=0."""
     if positions not in VALID_POSITIONS:
         raise ValueError(f"oprd_positions must be one of {VALID_POSITIONS}, got {positions!r}")
     rm = response_mask.float()
@@ -53,6 +56,11 @@ def position_mask(response_mask: torch.Tensor, positions: str, last_k: int = 200
         return rm * (pos == (n - 1).clamp(min=0)).float()
     if positions == "first_k":
         k = torch.minimum(n, torch.full_like(n, int(first_k)))
+        return rm * (pos < k).float()
+    if positions == "first_frac":
+        if not 0.0 < float(frac) <= 1.0:
+            raise ValueError(f"oprd_frac must be in (0, 1], got {frac}")
+        k = torch.ceil(n.double() * float(frac) - 1e-9).long()   # -1e-9: 100*0.07 = 7.000000000000001 -> 7, not 8
         return rm * (pos < k).float()
     k = torch.minimum(n, torch.full_like(n, int(last_k)))
     return rm * ((pos >= (n - k).clamp(min=0)) & (pos < n)).float()

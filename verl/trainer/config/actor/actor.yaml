@@ -181,6 +181,7 @@ self_distillation:
   oprd_positions: last_k
   oprd_last_k: 2000
   oprd_first_k: 2000
+  oprd_frac: 0.25
   oprd_normalize: false
 
   # q = softmax(log p_real + beta * (log p_real - log p_null))
