@@ -196,5 +196,41 @@ check("⑧ student grad at t=0 and the first_frac tokens only", torch.equal(sg.g
 man0 = torch.stack([(((sg[:, l] - tg[:, l]) ** 2).mean(-1) * mq).sum() / mq.sum() for l in range(2)]).mean()
 check("⑧ loss = token-mean incl. t=0", torch.allclose(O.mse_loss(sg, tg, mq), man0))
 
+# ⑨ t=0 arms (user 10-31): V0 + t=0 hidden (positions=none + include_t0) and the y_0-only JSD control
+pn = O.position_mask(rm, "none")
+check("⑨ positions=none -> all zero", tuple(pn.shape) == tuple(rm.shape) and pn.sum().item() == 0)
+mn = O.with_t0(pn, rm)
+check("⑨ none + with_t0 -> only column 0, for non-empty rows", torch.equal(mn[:, 0], (rm.sum(1) > 0).float()) and mn[:, 1:].sum().item() == 0)
+sg2 = torch.randn(B, 2, R + 1, 4, requires_grad=True); tg2 = torch.randn(B, 2, R + 1, 4)
+O.mse_loss(sg2, tg2, mn).backward()
+check("⑨ grad only at t=0", torch.equal(sg2.grad.abs().sum((1, 3)) > 0, mn.bool()))
+check("⑨ config: none without include_t0 raises", raises(lambda: C(oprd_enable=True, oprd_positions="none")))
+check("⑨ config: none + include_t0 + only=False accepted", not raises(lambda: C(oprd_enable=True, oprd_positions="none", oprd_include_t0=True, oprd_only=False)))
+check("⑨ runtime: none without include_t0 raises", raises(lambda: A._oprd_cfg(fake, cfg(oprd_positions="none")), ValueError))
+check("⑨ runtime: none + include_t0 ok", A._oprd_cfg(fake, cfg(oprd_positions="none", oprd_include_t0=True, oprd_only=False))["only"] is False)
+check("⑨ config: sd_first_token_only default False, + OPRD raises", C().sd_first_token_only is False
+      and raises(lambda: C(sd_first_token_only=True, oprd_enable=True, oprd_positions="none", oprd_include_t0=True)))
+check("⑨ runtime: sd_first_token_only + OPRD raises", raises(lambda: A._oprd_cfg(fake, cfg(oprd_positions="none", oprd_include_t0=True, sd_first_token_only=True)), ValueError))
+fm = O.first_token_mask(rm)
+check("⑨ first_token_mask: column 0 of non-empty rows only", torch.equal(fm[:, 0], rm[:, 0]) and fm[:, 1:].sum().item() == 0 and fm.dtype == rm.dtype)
+# y_0-only JSD normalisation: student = teacher everywhere except y_0 -> full-mask loss = sum JSD(y_0) / n_all,
+# y_0-only loss = sum JSD(y_0) / n_rows (token-mean over the y_0 tokens)
+from verl.trainer.ppo.core_algos import compute_self_distillation_loss  # noqa: E402
+class _Cfg(dict):
+    __getattr__ = dict.get
+sdc = _Cfg({"full_logit_distillation": True, "distillation_topk": 8, "distillation_add_tail": True, "renorm_topk_log_probs": False,
+            "alpha": 0.5, "is_clip": None, "counterfactual_null_mode": None, "counterfactual_extrapolation_beta": 0.0,
+            "counterfactual_u_clip_pos": False, "log_prob_dump_dir": None})
+Bj, Rj, K = 3, 6, 8
+rmj = torch.tensor([[1.] * 6, [1.] * 4 + [0.] * 2, [1.] * 2 + [0.] * 4])
+st = torch.log_softmax(torch.randn(Bj, Rj, K), -1) - 0.1; tt = st.clone(); tt[:, 0] = torch.log_softmax(torch.randn(Bj, K), -1) - 0.1
+lpj = torch.randn(Bj, Rj)
+def _jsd(mask):
+    return compute_self_distillation_loss(student_log_probs=lpj, teacher_log_probs=lpj.clone(), response_mask=mask,
+                                          self_distillation_config=sdc, old_log_probs=lpj.clone(), student_topk_log_probs=st,
+                                          teacher_topk_log_probs=tt, self_distillation_mask=torch.ones(Bj), loss_agg_mode="token-mean")[0]
+lf, l0 = _jsd(rmj), _jsd(O.first_token_mask(rmj))
+check("⑨ y_0-only loss = full loss x n_all / n_rows (only y_0 differs)", lf.item() > 0 and torch.allclose(l0, lf * rmj.sum() / Bj, rtol=1e-4))
+
 print(f"\n{'ALL PASS' if not fails else 'FAILED: ' + ', '.join(fails)}")
 sys.exit(1 if fails else 0)

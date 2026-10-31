@@ -148,6 +148,9 @@ class SelfDistillationConfig(BaseConfig):
     oprd_frac: float = 0.25          # first_frac only: supervise the first ceil(frac * n) response tokens (ablation, not in OPRD)
     oprd_normalize: bool = False     # False = paper/main (plain MSE); True = OPRD-Bridge branch (L2-normalised MSE)
     oprd_include_t0: bool = False    # also supervise t=0 = the last prompt token's hidden state (pre-generation; ablation, not in OPRD)
+    # user 10-31 control "distil t=0 only" (token distributions): the V0 JSD is trained on y_0 only (token-mean over the
+    # y_0 tokens of the micro-batch, i.e. each y_0 gets ~mean-length x its V0 weight). Not combinable with OPRD / PBD / TSW.
+    sd_first_token_only: bool = False
     counterfactual_u_clip_pos: bool = False
     counterfactual_st_enable: bool = False
     counterfactual_st_tau: float = 0.10
@@ -236,11 +239,15 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError("PBD v0.1 runs on the V0 base: counterfactual_null_mode must be None (12 §5 guard)")
             if self.teacher_target_mode not in (None, "legacy"):
                 raise ValueError("PBD requires teacher_target_mode=legacy")
+        if self.sd_first_token_only and (self.oprd_enable or self.pbd_enable or self.tsw_enable):
+            raise ValueError("self_distillation.sd_first_token_only is a plain-V0 control: OPRD / PBD / TSW must be off")
         if self.oprd_enable:
             if self.oprd_layers not in ("all", "last", "even", "odd"):
                 raise ValueError(f"self_distillation.oprd_layers must be all|last|even|odd, got {self.oprd_layers!r}")
-            if self.oprd_positions not in ("all", "last", "last_k", "first_k", "first_frac"):
-                raise ValueError(f"self_distillation.oprd_positions must be all|last|last_k|first_k|first_frac, got {self.oprd_positions!r}")
+            if self.oprd_positions not in ("all", "last", "last_k", "first_k", "first_frac", "none"):
+                raise ValueError(f"self_distillation.oprd_positions must be all|last|last_k|first_k|first_frac|none, got {self.oprd_positions!r}")
+            if self.oprd_positions == "none" and not self.oprd_include_t0:
+                raise ValueError("self_distillation.oprd_positions=none supervises nothing unless oprd_include_t0=True")
             if not 0.0 < self.oprd_frac <= 1.0:
                 raise ValueError(f"self_distillation.oprd_frac must be in (0, 1], got {self.oprd_frac}")
             if self.oprd_coef < 0 or self.oprd_last_k < 1 or self.oprd_first_k < 1:

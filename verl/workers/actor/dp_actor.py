@@ -332,6 +332,8 @@ class DataParallelPPOActor(BasePPOActor):
         if c["positions"] not in _oprd.VALID_POSITIONS: raise ValueError(f"oprd_positions must be one of {_oprd.VALID_POSITIONS}")
         if c["coef"] < 0 or c["last_k"] < 1 or c["first_k"] < 1: raise ValueError("oprd_coef >= 0, oprd_last_k/first_k >= 1")
         if not 0.0 < c["frac"] <= 1.0: raise ValueError("oprd_frac must be in (0, 1]")
+        if c["positions"] == "none" and not c["include_t0"]: raise ValueError("oprd_positions=none requires oprd_include_t0=True")
+        if bool(sd.get("sd_first_token_only", False)): raise ValueError("sd_first_token_only is a plain-V0 control (OPRD must be off)")
         if self.use_ulysses_sp or self.use_fused_kernels: raise ValueError("OPRD requires ulysses_sp=1 and use_fused_kernels=False")
         if sd.get("counterfactual_null_mode", None) not in (None, "null", "None"):
             raise ValueError("OPRD-Vanilla runs on the V0 base: counterfactual_null_mode must be None")
@@ -1383,10 +1385,17 @@ class DataParallelPPOActor(BasePPOActor):
                                     }
                                 )
                         loss_compute_start = time.perf_counter()
+                        sd_response_mask = response_mask
+                        if bool(self_distillation_cfg.get("sd_first_token_only", False)):   # user 10-31: JSD on y_0 only
+                            if oprd_cfg is not None or model_inputs.get("pbd_loss_mask") is not None or model_inputs.get("tsw_weight") is not None:
+                                raise ValueError("sd_first_token_only is a plain-V0 control (OPRD / PBD / TSW must be off)")
+                            from verl.utils.oprd import first_token_mask
+                            sd_response_mask = first_token_mask(response_mask)
+                            micro_batch_metrics["self_distillation/first_token_only_tokens"] = float(sd_response_mask.sum().item())
                         vopd_loss, vopd_metrics = compute_self_distillation_loss(
                             student_log_probs=log_prob,
                             teacher_log_probs=teacher_log_prob,
-                            response_mask=response_mask,
+                            response_mask=sd_response_mask,
                             self_distillation_config=self_distillation_cfg,
                             old_log_probs=old_log_prob,
                             student_all_log_probs=student_all_logps,
@@ -1401,7 +1410,9 @@ class DataParallelPPOActor(BasePPOActor):
                             self_distillation_mask=self_distillation_mask,
                             loss_agg_mode=loss_agg_mode,
                             rollout_is_weights=rollout_is_weights,
-                            batch_num_tokens=self.config.global_batch_info.get("batch_num_tokens"),
+                            # y_0-only: normalise by the y_0 count of the micro-batch (a global ALL-token count would shrink
+                            # the loss by ~mean length); the legacy path leaves global_batch_info empty anyway
+                            batch_num_tokens=None if sd_response_mask is not response_mask else self.config.global_batch_info.get("batch_num_tokens"),
                             global_batch_size=self.config.global_batch_info.get("global_batch_size"),
                             loss_scale_factor=self.config.global_batch_info.get("loss_scale_factor"),
                             pbd_loss_mask=model_inputs.get("pbd_loss_mask"),

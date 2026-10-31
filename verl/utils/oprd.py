@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 VALID_LAYERS = ("all", "last", "even", "odd")
-VALID_POSITIONS = ("all", "last", "last_k", "first_k", "first_frac")
+VALID_POSITIONS = ("all", "last", "last_k", "first_k", "first_frac", "none")   # none: no response token (use with include_t0)
 
 
 def layer_indices(num_hidden_states: int, layers: str) -> list[int]:
@@ -49,6 +49,8 @@ def position_mask(response_mask: torch.Tensor, positions: str, last_k: int = 200
     rm = response_mask.float()
     if positions == "all":
         return rm
+    if positions == "none":   # user 10-31 arm "V0 + t=0 hidden": only the pre-generation state, added by with_t0
+        return torch.zeros_like(rm)
     B, R = rm.shape
     pos = torch.arange(R, device=rm.device).unsqueeze(0)
     n = rm.long().sum(1, keepdim=True)
@@ -73,6 +75,14 @@ def with_t0(pm: torch.Tensor, response_mask: torch.Tensor) -> torch.Tensor:
     DataParallelPPOActor._oprd_response_token_positions(..., include_t0=True), whose column 0 is response_start - 1 of each view."""
     has = (response_mask.float().sum(1, keepdim=True) > 0).to(pm.dtype)
     return torch.cat([has, pm], 1)
+
+
+def first_token_mask(response_mask: torch.Tensor) -> torch.Tensor:
+    """(B, R) mask keeping only y_0 (response column 0; responses are left-aligned in the response block) of every row with
+    a non-empty response. User 10-31 control "distil t=0 only" in token-distribution space: the V0 JSD restricted to y_0."""
+    keep = torch.zeros_like(response_mask)
+    keep[:, :1] = response_mask[:, :1]
+    return keep
 
 
 def gather_response_hidden(hidden_states, idx: list[int], abs_pos: torch.Tensor, valid: torch.Tensor,

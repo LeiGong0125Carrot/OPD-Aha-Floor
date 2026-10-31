@@ -184,6 +184,7 @@ self_distillation:
   oprd_frac: 0.25
   oprd_normalize: false
   oprd_include_t0: false
+  sd_first_token_only: false
 
   # q = softmax(log p_real + beta * (log p_real - log p_null))
   counterfactual_extrapolation_beta: 1.0
