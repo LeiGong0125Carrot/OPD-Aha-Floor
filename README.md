@@ -57,6 +57,15 @@ The released checkpoints are available on 🤗 Hugging Face:
 | `scripts/` | Data preparation, training, checkpoint merging, and serving entrypoints |
 | `eval/` | Fine-grained perception inference and scoring |
 | `eval/math/` | Mathematical reasoning inference and scoring |
+| `docs/` | Research plans and experimental design notes |
+
+## Research Plans
+
+[Entropy-GRPO + constrained maximum-entropy Aha research plan (中文)](docs/entropy_grpo_aha_research_plan_zh.md)
+records the motivation, published references, mathematical derivation, solver specification,
+implementation caveats, ablations, and validation checklist for a proposed entropy-based extension.
+**Status: research proposal, not an implemented or validated training recipe.** The default OPD-Aha
+training workflow is unchanged.
 
 ## Quick Start
 
